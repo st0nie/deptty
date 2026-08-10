@@ -8,10 +8,10 @@ repository = "https://github.com/st0nie/deptty"
 
 [dependencies]
 dtk = { git = "https://github.com/st0nie/dtk-rs" }
-alacritty_terminal = "0.25"
+alacritty_terminal = "0.26"
 portable-pty = "0.9"
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 dirs = "6"
 libc = "0.2"
 
