@@ -2,6 +2,9 @@
 name = "deptty"
 version = "0.1.0"
 edition = "2024"
+description = "deepin-terminal rewritten in Rust on DTK6"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/st0nie/deptty"
 
 [dependencies]
 dtk = { git = "https://github.com/st0nie/dtk-rs" }
@@ -11,3 +14,13 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 dirs = "6"
 libc = "0.2"
+
+[package.metadata.deb]
+maintainer = "st0nie"
+section = "utils"
+priority = "optional"
+depends = "$auto"
+assets = [
+    ["target/release/deptty", "usr/bin/", "755"],
+    ["assets/deptty.desktop", "usr/share/applications/", "644"],
+]

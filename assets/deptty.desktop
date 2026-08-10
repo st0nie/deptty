@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=deptty
+GenericName=Terminal
+Comment=deepin-terminal rewritten in Rust on DTK6
+Exec=deptty
+Icon=deepin-terminal
+Type=Application
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;

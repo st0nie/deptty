@@ -37,6 +37,16 @@ QT_QPA_PLATFORM=offscreen ./target/debug/deptty --smoke   # headless smoke test
 Smoke test spawns a real shell, injects `echo DTKTERM_SMOKE_OK`, asserts the
 grid shows it, prints `smoke ok`.
 
+## .deb package
+
+[cargo-deb](https://github.com/kornelski/cargo-deb) (shared-lib deps via
+`dpkg-shlibdeps` — no dh-cargo):
+
+```sh
+cargo install cargo-deb
+cargo deb        # -> target/debian/deptty_<ver>_amd64.deb
+```
+
 ## Config
 
 `~/.config/deptty/config.toml` (all keys optional):
