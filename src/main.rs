@@ -309,7 +309,7 @@ fn key_bytes(k: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
         key::LEFT => csi(b"\x1b[D", b'D'),
         key::HOME => csi(b"\x1b[H", b'H'),
         key::END => csi(b"\x1b[F", b'F'),
-        key::BACKTAB => csi(b"\x1b[Z", b'Z'),
+        key::BACKTAB => b"\x1b[Z".to_vec(), // Shift+Tab is always CSI Z (xterm)
         key::DELETE => tilde(b"\x1b[3~", 3),
         key::PAGE_UP => tilde(b"\x1b[5~", 5),
         key::PAGE_DOWN => tilde(b"\x1b[6~", 6),
@@ -548,6 +548,64 @@ fn mouse_report(term: &AppTerm, b: i32, col: usize, row: i32, press: bool) -> Ve
 /// screen row of a mouse event, accounting for the tab bar strip
 fn mouse_row(y: i32, g: &GridGeom) -> i32 {
     (y - TAB_H) / g.cell_h
+}
+
+/// char-index span of the http(s):// URL covering char index `col`, if any
+fn find_url_span(text: &str, col: usize) -> Option<(usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let delim = |c: char| {
+        matches!(c, ' ' | '\t' | '"' | '\'' | '<' | '>' | '`' | '|' | '(' | ')' | '[' | ']' | '{' | '}')
+    };
+    let starts = |i: usize, pat: &str| {
+        chars[i..].iter().take(pat.len()).copied().eq(pat.chars())
+    };
+    let mut i = 0;
+    while i + 7 <= chars.len() {
+        let (https, hit) = (starts(i, "https://"), starts(i, "http://"));
+        if https || hit {
+            let mut e = i + if https { 8 } else { 7 };
+            while e < chars.len() && !delim(chars[e]) {
+                e += 1;
+            }
+            if col >= i && col < e {
+                return Some((i, e));
+            }
+            i = e; // don't rescan inside a URL ("http://x http://y")
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+/// URL + its column span at screen cell (line, col); None when not on a link.
+/// ponytail: single grid line; a soft-wrapped URL only matches within each fragment
+fn url_at(term: &AppTerm, line: i32, col: usize) -> Option<(String, usize, usize)> {
+    use alacritty_terminal::term::cell::Flags;
+    let offset = term.grid().display_offset() as i64;
+    // one char per cell so char index == column (spacers/\0 padding become blanks)
+    let mut chars: Vec<char> = Vec::new();
+    for indexed in term.grid().display_iter() {
+        if i64::from(indexed.point.line.0) + offset != i64::from(line) {
+            continue;
+        }
+        let c = indexed.cell.c;
+        chars.push(if c == '\0' || indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) { ' ' } else { c });
+    }
+    let text: String = chars.iter().collect();
+    let (s, e) = find_url_span(&text, col)?;
+    Some((chars[s..e].iter().collect(), s, e))
+}
+
+/// open in the default browser, detached (xdg-open = QDesktopServices::openUrl)
+fn open_url(url: &str) {
+    use std::process::Stdio;
+    let _ = std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 
 /// if the app enabled mouse reporting (vim mouse=a, htop, ...): report, return true
@@ -1012,6 +1070,43 @@ fn main() {
         let tb_slot = tb_slot.clone();
         let cells = cells.clone();
         let selecting = Rc::new(std::cell::Cell::new(false));
+        // hovered link span: (screen line, start col, end col)
+        let hover = Rc::new(std::cell::RefCell::new(None::<(i32, usize, usize)>));
+        // last mouse position + current cursor shape: Ctrl press/release
+        // re-evaluates hover without a mouse move (deepin-terminal parity)
+        let mpos = Rc::new(std::cell::Cell::new((0i32, 0i32)));
+        let cur_shape = Rc::new(std::cell::Cell::new(qt::cursor::IBEAM));
+        let update_hover = {
+            let tabs = tabs.clone();
+            let active = active.clone();
+            let geom = geom.clone();
+            let hover = hover.clone();
+            let view = view.clone();
+            let cur_shape = cur_shape.clone();
+            move |x: i32, y: i32, ctrl: bool| {
+                let shared = active_shared(&tabs, &active);
+                let new = {
+                    let term = shared.term.lock();
+                    let col = (x / geom.cell_w).clamp(0, term.grid().columns() as i32 - 1) as usize;
+                    let row = mouse_row(y, &geom).clamp(0, term.grid().screen_lines() as i32 - 1);
+                    url_at(&term, row, col).map(|(_, s, e)| (row, s, e))
+                };
+                // underline on any hover; clickable (pointing hand) only with Ctrl
+                let shape = if new.is_some() && ctrl { qt::cursor::POINTING_HAND } else { qt::cursor::IBEAM };
+                if shape != cur_shape.get() {
+                    cur_shape.set(shape);
+                    if let Some(w) = &*view.borrow() {
+                        w.set_cursor(shape);
+                    }
+                }
+                if new != *hover.borrow() {
+                    *hover.borrow_mut() = new;
+                    if let Some(w) = &*view.borrow() {
+                        w.update();
+                    }
+                }
+            }
+        };
         // click streak for double/triple click: (when, line, col, count)
         let streak = Rc::new(std::cell::RefCell::new(
             None::<(std::time::Instant, i32, usize, u8)>,
@@ -1026,6 +1121,18 @@ fn main() {
                     snapshot_grid(&term)
                 };
                 render(&snap, &p, &geom, &fonts, w, h, TAB_H);
+                // hovered link underline (mouse-over, deepin-terminal style)
+                if let Some((line, s, e)) = *hover.borrow() {
+                    let lw = (geom.cell_h / 12).max(1);
+                    let c = color_q(Color::Named(NamedColor::Foreground), &scheme());
+                    p.fill_rect(
+                        s as i32 * geom.cell_w,
+                        TAB_H + line * geom.cell_h + geom.ascent + 1,
+                        (e - s) as i32 * geom.cell_w,
+                        lw,
+                        &c,
+                    );
+                }
                 if let Some(sb) = *sb_slot.borrow() {
                     let term = shared.term.lock();
                     sync_scrollbar(&term, sb, &syncing_sb);
@@ -1043,6 +1150,12 @@ fn main() {
                         );
                     }
                 }
+            }
+            // Ctrl press/release over a link toggles the clickable cursor even
+            // without a mouse move
+            PaintWidgetEvent::Key(k) if k.key == qt::key::CONTROL => {
+                let (x, y) = mpos.get();
+                update_hover(x, y, k.press);
             }
             PaintWidgetEvent::Key(k) if k.press => {
                 let shared = active_shared(&tabs, &active);
@@ -1123,6 +1236,18 @@ fn main() {
                 }
                 match m.kind {
                 k if k == qt::mouse_kind::PRESS && m.button == qt::mouse_button::LEFT => {
+                    // Ctrl+click on a link opens it in the browser (deepin-terminal)
+                    if m.mods & qt::modifier::CONTROL != 0 {
+                        let shared = active_shared(&tabs, &active);
+                        let term = shared.term.lock();
+                        let col = (m.x / geom.cell_w).clamp(0, term.grid().columns() as i32 - 1) as usize;
+                        let row = mouse_row(m.y, &geom).clamp(0, term.grid().screen_lines() as i32 - 1);
+                        if let Some((url, _, _)) = url_at(&term, row, col) {
+                            drop(term);
+                            open_url(&url);
+                            return;
+                        }
+                    }
                     selecting.set(true);
                     let shared = active_shared(&tabs, &active);
                     let mut term = shared.term.lock();
@@ -1185,6 +1310,12 @@ fn main() {
                     if let Some(w) = &*view.borrow() {
                         w.update();
                     }
+                }
+                k if k == qt::mouse_kind::MOVE => {
+                    // link hover: underline on mouse-over (no Ctrl needed), like
+                    // deepin-terminal; Ctrl is only required for the click
+                    mpos.set((m.x, m.y));
+                    update_hover(m.x, m.y, m.mods & qt::modifier::CONTROL != 0);
                 }
                 k if k == qt::mouse_kind::RELEASE && m.button == qt::mouse_button::LEFT => {
                     selecting.set(false);
@@ -1370,6 +1501,8 @@ fn main() {
     spawn_tab(&cfg, &tabs, &active, tabbar, &view, cols, lines, cwd);
     // terminal expects immediate keyboard input; DMainWindow focus defaults elsewhere
     pw.set_focus();
+    // deepin-terminal look: I-beam over the grid (arrow is the default)
+    pw.as_widget().set_cursor(qt::cursor::IBEAM);
 
     if smoke {
         let view = view.clone();
@@ -1570,5 +1703,24 @@ mod tests {
             key_bytes(&kev(key::UP, modifier::SHIFT, ""), true),
             Some(b"\x1b[1;2A".to_vec())
         );
+    }
+
+    #[test]
+    fn shift_tab_is_csi_z() {
+        // xterm: Shift+Tab (Backtab) is always plain CSI Z, never mod-encoded
+        assert_eq!(key_bytes(&kev(key::BACKTAB, modifier::SHIFT, ""), false), Some(b"\x1b[Z".to_vec()));
+    }
+
+    #[test]
+    fn url_spans() {
+        let t = "see https://example.com/a?b=1 end";
+        assert_eq!(find_url_span(t, 5), Some((4, 29)));
+        assert_eq!(find_url_span(t, 4), Some((4, 29)));
+        assert_eq!(find_url_span(t, 29), None); // trailing space: off the link
+        assert_eq!(find_url_span(t, 0), None);
+        assert_eq!(find_url_span("no link at all", 3), None);
+        assert_eq!(find_url_span("http://a.b", 0), Some((0, 10)));
+        assert_eq!(find_url_span("(https://x.y)", 2), Some((1, 12))); // stops at ')'
+        assert_eq!(find_url_span("see http://x and https://y.z", 20), Some((17, 28)));
     }
 }
