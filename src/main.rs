@@ -1468,6 +1468,8 @@ fn main() {
 
     // DTK scrollbar, overlaid on the right edge
     let sb = ScrollBar::new(&pw.as_widget());
+    // child widgets inherit the parent's I-beam; scrollbar wants the arrow
+    sb.as_widget().set_cursor(qt::cursor::ARROW);
     sb.as_widget().show();
     *sb_slot.borrow_mut() = Some(sb);
     sb.on_value_changed({
