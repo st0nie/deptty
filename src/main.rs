@@ -1073,8 +1073,10 @@ fn main() {
         let tb_slot = tb_slot.clone();
         let cells = cells.clone();
         let selecting = Rc::new(std::cell::Cell::new(false));
-        // hovered link span: (screen line, start col, end col)
-        let hover = Rc::new(std::cell::RefCell::new(None::<(i32, usize, usize)>));
+        // hovered grid cell (screen line, col); the URL span is recomputed from
+        // the grid snapshot every paint, so links typed or grown under a
+        // stationary mouse underline in real time (deepin-terminal parity)
+        let hover = Rc::new(std::cell::Cell::new(None::<(i32, usize)>));
         // last mouse position + current cursor shape: Ctrl press/release
         // re-evaluates hover without a mouse move (deepin-terminal parity)
         let mpos = Rc::new(std::cell::Cell::new((0i32, 0i32)));
@@ -1088,22 +1090,22 @@ fn main() {
             let cur_shape = cur_shape.clone();
             move |x: i32, y: i32, ctrl: bool| {
                 let shared = active_shared(&tabs, &active);
-                let new = {
+                let (row, col, over) = {
                     let term = shared.term.lock();
                     let col = (x / geom.cell_w).clamp(0, term.grid().columns() as i32 - 1) as usize;
                     let row = mouse_row(y, &geom).clamp(0, term.grid().screen_lines() as i32 - 1);
-                    url_at(&term, row, col).map(|(_, s, e)| (row, s, e))
+                    (row, col, url_at(&term, row, col).is_some())
                 };
                 // underline on any hover; clickable (pointing hand) only with Ctrl
-                let shape = if new.is_some() && ctrl { qt::cursor::POINTING_HAND } else { qt::cursor::IBEAM };
+                let shape = if over && ctrl { qt::cursor::POINTING_HAND } else { qt::cursor::IBEAM };
                 if shape != cur_shape.get() {
                     cur_shape.set(shape);
                     if let Some(w) = &*view.borrow() {
                         w.set_cursor(shape);
                     }
                 }
-                if new != *hover.borrow() {
-                    *hover.borrow_mut() = new;
+                if hover.get() != Some((row, col)) {
+                    hover.set(Some((row, col)));
                     if let Some(w) = &*view.borrow() {
                         w.update();
                     }
@@ -1124,17 +1126,30 @@ fn main() {
                     snapshot_grid(&term)
                 };
                 render(&snap, &p, &geom, &fonts, w, h, TAB_H);
-                // hovered link underline (mouse-over, deepin-terminal style)
-                if let Some((line, s, e)) = *hover.borrow() {
-                    let lw = (geom.cell_h / 12).max(1);
-                    let c = color_q(Color::Named(NamedColor::Foreground), &scheme());
-                    p.fill_rect(
-                        s as i32 * geom.cell_w,
-                        TAB_H + line * geom.cell_h + geom.ascent + 1,
-                        (e - s) as i32 * geom.cell_w,
-                        lw,
-                        &c,
-                    );
+                // hovered link underline: span recomputed from this frame's
+                // snapshot (mouse-over, deepin-terminal style)
+                if let Some((line, col)) = hover.get() {
+                    use alacritty_terminal::term::cell::Flags;
+                    let mut chars: Vec<char> = Vec::new();
+                    for cs in &snap.cells {
+                        if cs.line != line {
+                            continue;
+                        }
+                        let c = cs.cell.c;
+                        chars.push(if c == '\0' || cs.cell.flags.contains(Flags::WIDE_CHAR_SPACER) { ' ' } else { c });
+                    }
+                    let text: String = chars.iter().collect();
+                    if let Some((s, e)) = find_url_span(&text, col) {
+                        let lw = (geom.cell_h / 12).max(1);
+                        let c = color_q(Color::Named(NamedColor::Foreground), &scheme());
+                        p.fill_rect(
+                            s as i32 * geom.cell_w,
+                            TAB_H + line * geom.cell_h + geom.ascent + 1,
+                            (e - s) as i32 * geom.cell_w,
+                            lw,
+                            &c,
+                        );
+                    }
                 }
                 if let Some(sb) = *sb_slot.borrow() {
                     let term = shared.term.lock();
