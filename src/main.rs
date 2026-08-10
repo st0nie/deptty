@@ -586,8 +586,44 @@ fn try_report_mouse(shared: &Arc<Shared>, m: &MouseEvent, g: &GridGeom) -> bool 
     true
 }
 
+/// owned copy of everything render() needs from the grid: taken under a short
+/// lock so the reader thread is never stalled by QPainter time (vtebench:
+/// painting used to hold the FairMutex and throttle parsing)
+struct CellSnap {
+    point: Point,
+    line: i32, // screen row (grid line + display_offset)
+    cell: alacritty_terminal::term::cell::Cell,
+}
+
+struct GridSnap {
+    cells: Vec<CellSnap>,
+    cursor: Point,
+    offset: i64,
+    sel: Option<alacritty_terminal::selection::SelectionRange>,
+}
+
+fn snapshot_grid(term: &AppTerm) -> GridSnap {
+    let offset = term.grid().display_offset() as i64;
+    let sel = term.selection.as_ref().and_then(|s| s.to_range(term));
+    let cursor = term.grid().cursor.point;
+    let mut cells = Vec::with_capacity(term.grid().screen_lines() * term.grid().columns());
+    for indexed in term.grid().display_iter() {
+        let line = i64::from(indexed.point.line.0) + offset;
+        if line < 0 {
+            continue;
+        }
+        cells.push(CellSnap {
+            point: indexed.point,
+            line: line as i32,
+            cell: indexed.cell.clone(),
+        });
+    }
+    GridSnap { cells, cursor, offset, sel }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render(
-    term: &AppTerm,
+    snap: &GridSnap,
     p: &Painter,
     g: &GridGeom,
     fonts: &Fonts,
@@ -604,17 +640,13 @@ fn render(
     let mut run_col = 0usize;
     let mut run_st: Option<RunStyle> = None;
     let mut next_col = 0usize;
-    let cursor = term.grid().cursor.point;
-    let offset = term.grid().display_offset() as i64;
-    let sel = term.selection.as_ref().and_then(|s| s.to_range(term));
-    for indexed in term.grid().display_iter() {
-        // grid line -> screen row: scrolled-up views show negative (history) lines
-        let line = i64::from(indexed.point.line.0) + offset;
-        if line < 0 {
-            continue;
-        }
-        let col = indexed.point.column.0;
-        let cell = indexed.cell;
+    let cursor = snap.cursor;
+    let offset = snap.offset;
+    let sel = snap.sel.as_ref();
+    for cs in &snap.cells {
+        let line = i64::from(cs.line);
+        let col = cs.point.column.0;
+        let cell = &cs.cell;
         use alacritty_terminal::term::cell::Flags;
         if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
             continue; // bg/cursor already painted by the wide char to our left
@@ -628,7 +660,7 @@ fn render(
         let is_cursor = offset == 0
             && i64::from(cursor.line.0) == line
             && (cur_col == col || (wide && cur_col == col + 1));
-        let selected = sel.as_ref().is_some_and(|r| r.contains(indexed.point));
+        let selected = sel.is_some_and(|r| r.contains(cs.point));
         if is_cursor || selected || !matches!(bg, Color::Named(NamedColor::Background)) {
             // ponytail: block cursor = translucent overlay, no blink
             let (o_r, o_g, o_b) = if sc.dark { (255, 255, 255) } else { (0, 0, 0) };
@@ -987,14 +1019,20 @@ fn main() {
         move |ev| match ev {
             PaintWidgetEvent::Paint(p, w, h) => {
                 let shared = active_shared(&tabs, &active);
-                let term = shared.term.lock();
-                render(&term, &p, &geom, &fonts, w, h, TAB_H);
+                // short lock: snapshot the grid, then paint unlocked so the
+                // reader thread never waits on QPainter
+                let snap = {
+                    let term = shared.term.lock();
+                    snapshot_grid(&term)
+                };
+                render(&snap, &p, &geom, &fonts, w, h, TAB_H);
                 if let Some(sb) = *sb_slot.borrow() {
+                    let term = shared.term.lock();
                     sync_scrollbar(&term, sb, &syncing_sb);
                 }
                 // keep the IME candidate window glued to the cursor
-                let cur = term.grid().cursor.point;
-                let row = cur.line.0 + term.grid().display_offset() as i32;
+                let cur = snap.cursor;
+                let row = cur.line.0 + snap.offset as i32;
                 if row >= 0 {
                     if let Some(w) = &*view.borrow() {
                         w.set_ime_cursor_rect(
