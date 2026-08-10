@@ -986,6 +986,11 @@ fn spawn_tab(
     notifier.leak();
 
     let i = tabbar.add_tab(&title);
+    // deepin-terminal caps tab item width (their tabbar.cpp: min 110 / max 450px);
+    // long titles elide instead of stretching the tab. Height unconstrained.
+    const QWIDGETSIZE_MAX: i32 = (1 << 24) - 1;
+    tabbar.set_tab_minimum_size(i, &QSize::new(110, 0));
+    tabbar.set_tab_maximum_size(i, &QSize::new(450, QWIDGETSIZE_MAX));
     tabbar.set_current_index(i);
     tabbar.as_widget().flush_layout();
     tabs.borrow_mut().push(Tab { shared, pid });
@@ -1606,6 +1611,14 @@ fn main() {
                         );
                         assert_eq!(tabs.borrow().len(), 2, "second tab missing");
                         assert_eq!(tabbar.count(), 2, "tabbar count mismatch");
+                        // deepin-terminal tab width bounds: long titles elide
+                        // instead of stretching the tab (cap 450, floor 110)
+                        tabbar.set_tab_text(1, &"x".repeat(500));
+                        tabbar.as_widget().flush_layout();
+                        let w_long = tabbar.tab_rect(1).width();
+                        assert!(w_long <= 450, "tab width {w_long} exceeds 450 cap");
+                        let w_short = tabbar.tab_rect(0).width();
+                        assert!(w_short >= 110, "tab width {w_short} below 110 floor");
                     }
                     // OSC title -> tab label (sync happens on the next paint)
                     if !titled.replace(true) {
