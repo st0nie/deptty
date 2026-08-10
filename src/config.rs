@@ -1,0 +1,134 @@
+//! deptty configuration: TOML at ~/.config/deptty/config.toml.
+//! Missing file or keys fall back to defaults; unknown keys are ignored.
+use serde::Deserialize;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    /// terminal font point size
+    pub font_size: i32,
+    /// scrollback lines kept by the terminal emulator
+    pub scrollback: usize,
+    /// shell to launch (None -> $SHELL or /bin/bash)
+    pub shell: Option<String>,
+    /// font family (None -> system monospace); MUST be monospace for a sane grid
+    pub font_family: Option<String>,
+    /// alacritty-style key bindings: [[key_binding]] key="T" mods="Ctrl+Shift" action="new_tab"
+    pub key_bindings: Vec<KeyBinding>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            font_size: 12,
+            scrollback: 10_000,
+            shell: None,
+            font_family: None,
+            key_bindings: default_key_bindings(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Action {
+    Copy,
+    Paste,
+    NewTab,
+    CloseTab,
+    NextTab,
+    PrevTab,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct KeyBinding {
+    /// single character ("T", ";") or a qt key name ("Left", "Tab", "F5", "Escape", ...)
+    pub key: String,
+    /// "+"-joined: Ctrl, Shift, Alt (e.g. "Ctrl+Shift")
+    pub mods: String,
+    pub action: Action,
+}
+
+fn default_key_bindings() -> Vec<KeyBinding> {
+    let kb = |key: &str, mods: &str, action: Action| KeyBinding {
+        key: key.into(),
+        mods: mods.into(),
+        action,
+    };
+    vec![
+        kb("C", "Ctrl+Shift", Action::Copy),
+        kb("V", "Ctrl+Shift", Action::Paste),
+        kb("T", "Ctrl+Shift", Action::NewTab),
+        kb("W", "Ctrl+Shift", Action::CloseTab),
+        kb("Right", "Ctrl+Shift", Action::NextTab),
+        kb("Left", "Ctrl+Shift", Action::PrevTab),
+    ]
+}
+
+impl KeyBinding {
+    /// dtk::qt::modifier mask
+    pub fn mod_mask(&self) -> i32 {
+        let mut m = 0;
+        for part in self.mods.split('+') {
+            m |= match part.trim().to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => dtk::qt::modifier::CONTROL,
+                "shift" => dtk::qt::modifier::SHIFT,
+                "alt" => dtk::qt::modifier::ALT,
+                _ => 0,
+            };
+        }
+        m
+    }
+    /// qt key code: ASCII for single chars, qt::key::* for names
+    pub fn key_code(&self) -> Option<i32> {
+        use dtk::qt::key;
+        let s = self.key.as_str();
+        if let Some(c) = s.chars().next() {
+            if s.chars().count() == 1 {
+                return Some(c.to_ascii_uppercase() as i32);
+            }
+        }
+        Some(match s.to_ascii_lowercase().as_str() {
+            "escape" | "esc" => key::ESCAPE,
+            "tab" => key::TAB,
+            "backtab" => key::BACKTAB,
+            "backspace" => key::BACKSPACE,
+            "return" | "enter" => key::RETURN,
+            "left" => key::LEFT,
+            "right" => key::RIGHT,
+            "up" => key::UP,
+            "down" => key::DOWN,
+            "home" => key::HOME,
+            "end" => key::END,
+            "delete" => key::DELETE,
+            "insert" => key::INSERT,
+            "pageup" => key::PAGE_UP,
+            "pagedown" => key::PAGE_DOWN,
+            _ => return None,
+        })
+    }
+}
+
+impl Config {
+    pub fn load() -> Self {
+        // XDG_CONFIG_HOME already IS the config dir; only append .config under $HOME
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("~"))
+                    .join(".config")
+            });
+        let path = base.join("deptty/config.toml");
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match toml::from_str(&text) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    eprintln!("deptty: bad config {}: {e}, using defaults", path.display());
+                    Self::default()
+                }
+            },
+            Err(_) => Self::default(),
+        }
+    }
+}

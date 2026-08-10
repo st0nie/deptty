@@ -1,0 +1,67 @@
+# deptty
+
+deepin-terminal rewritten in Rust on DTK6 (via [dtk-rs](https://github.com/st0nie/dtk-rs)).
+
+Goal: a drop-in replacement for deepin-terminal — same UX, no C++.
+
+## Status
+
+Working today:
+
+- terminal emulation (VT parsing, screen grid, scrollback) via `alacritty_terminal`
+- PTY via `portable-pty`
+- tabs (in the titlebar, like deepin-terminal), new/close/switch, cwd inheritance
+- text selection + copy/paste, configurable keybindings
+- scrollback scrollbar + mouse wheel, mouse reporting for vim/htop
+- window title from OSC 0/2, tab labels
+- config file at `~/.config/deptty/config.toml`
+- headless smoke test (`--smoke`)
+
+Not yet: splits, search bar, themes/opacity, quake mode, remote management (SSH),
+single-instance via zbus, encoding detection, secret storage.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and the mapping of each
+deepin-terminal component to its Rust replacement.
+
+## Build & run
+
+Requires Linux with Qt6 + DTK6 dev packages (dtk-rs links `dtk6widget`).
+
+```sh
+cargo build
+./target/debug/deptty                  # run
+./target/debug/deptty --workdir /tmp   # start shell in a dir
+QT_QPA_PLATFORM=offscreen ./target/debug/deptty --smoke   # headless smoke test
+```
+
+Smoke test spawns a real shell, injects `echo DTKTERM_SMOKE_OK`, asserts the
+grid shows it, prints `smoke ok`.
+
+## Config
+
+`~/.config/deptty/config.toml` (all keys optional):
+
+```toml
+font_family = "Fira Code"
+font_size = 13
+scrollback = 20000
+shell = "/bin/zsh"
+
+[[key_bindings]]
+key = "T"            # single char or qt key name: "Left", "F5", "Escape", ...
+mods = "Ctrl+Shift"  # "+"-joined: Ctrl, Shift, Alt
+action = "new_tab"   # copy | paste | new_tab | close_tab | next_tab | prev_tab
+```
+
+Defaults: Ctrl+Shift+C/V copy/paste, Ctrl+Shift+T new tab, Ctrl+Shift+W close
+tab, Ctrl+Shift+Left/Right switch tab.
+
+## Layout
+
+```
+src/main.rs    app: window, tabs, render loop, input, PTY reader threads
+src/config.rs  Config + KeyBinding, TOML loading
+examples/      scratch probes
+```
+
+The terminal widget itself is one `dtk::PaintWidget`; see ARCHITECTURE.md for
+the data flow.
