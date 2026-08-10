@@ -853,6 +853,7 @@ fn spawn_tab(
                     let next = active.get().min(tabs.borrow().len() - 1);
                     active.set(next);
                     tabbar.set_current_index(next as i32);
+                    tabbar.as_widget().flush_layout();
                 }
                 return;
             }
@@ -872,6 +873,7 @@ fn spawn_tab(
                         if let Some(i) = ts.iter().position(|t2| Arc::ptr_eq(&t2.shared, &me)) {
                             if tabbar.tab_text(i as i32) != t {
                                 tabbar.set_tab_text(i as i32, &t);
+                                tabbar.as_widget().flush_layout();
                             }
                         }
                     }
@@ -892,6 +894,7 @@ fn spawn_tab(
 
     let i = tabbar.add_tab(&title);
     tabbar.set_current_index(i);
+    tabbar.as_widget().flush_layout();
     tabs.borrow_mut().push(Tab { shared, pid });
     active.set(tabs.borrow().len() - 1);
     // repaint immediately only for the first tab (fresh window); for later tabs a
