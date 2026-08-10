@@ -1237,9 +1237,11 @@ fn main() {
                     // typing clears the selection, like every other terminal
                     shared.term.lock().selection = None;
                 }
-                // typing jumps back to the prompt
-                shared.term.lock().scroll_display(Scroll::Bottom);
-                if let Some(bytes) = key_bytes(&k, shared.term.lock().mode().contains(TermMode::APP_CURSOR)) {
+                // typing jumps back to the prompt; modifier-only presses
+                // (Ctrl/Shift for a shortcut) produce no bytes and must not scroll
+                let app_cursor = shared.term.lock().mode().contains(TermMode::APP_CURSOR);
+                if let Some(bytes) = key_bytes(&k, app_cursor) {
+                    shared.term.lock().scroll_display(Scroll::Bottom);
                     let _ = shared.writer.lock().unwrap().write_all(&bytes);
                 }
             }
