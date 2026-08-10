@@ -930,6 +930,9 @@ fn spawn_tab(
                 exited |= drain[..n].contains(&b'q');
             }
             if exited {
+                // fd stays "readable" at EOF: stop the notifier or the event
+                // loop re-fires on it forever (100% CPU after the tab closes)
+                notifier.set_enabled(false);
                 // NB: tabbar.remove_tab/set_current_index emit currentChanged, which
                 // borrows `tabs` — never call them while holding a borrow (reentrancy)
                 let idx = tabs.borrow().iter().position(|t| Arc::ptr_eq(&t.shared, &me));

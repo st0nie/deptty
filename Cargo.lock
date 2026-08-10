@@ -266,7 +266,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 [[package]]
 name = "dtk"
 version = "0.1.0"
-source = "git+https://github.com/st0nie/dtk-rs#6dd353077a02a6ada60de90a3f7ea6a799ac585a"
+source = "git+https://github.com/st0nie/dtk-rs#ee7ba9ff57c874b6732c33128e970a0b7381fb70"
 dependencies = [
  "dtk-sys",
 ]
@@ -274,7 +274,7 @@ dependencies = [
 [[package]]
 name = "dtk-sys"
 version = "0.1.0"
-source = "git+https://github.com/st0nie/dtk-rs#6dd353077a02a6ada60de90a3f7ea6a799ac585a"
+source = "git+https://github.com/st0nie/dtk-rs#ee7ba9ff57c874b6732c33128e970a0b7381fb70"
 dependencies = [
  "cxx",
  "cxx-build",
