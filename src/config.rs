@@ -1,6 +1,6 @@
 //! deptty configuration: TOML at ~/.config/deptty/config.toml.
 //! Missing file or keys fall back to defaults; unknown keys are ignored.
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -109,17 +109,51 @@ impl KeyBinding {
     }
 }
 
+/// XDG_CONFIG_HOME already IS the config dir; only append .config under $HOME
+fn config_dir() -> std::path::PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("~"))
+                .join(".config")
+        })
+        .join("deptty")
+}
+
+/// remembered session state (konsole's konsolestaterc equivalent): kept out of
+/// config.toml so user comments/ordering survive
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct State {
+    /// last window size in pixels; applied on startup (deepin-terminal window_width/height)
+    pub window_width: Option<i32>,
+    pub window_height: Option<i32>,
+}
+
+impl State {
+    pub fn load() -> Self {
+        let path = config_dir().join("state.toml");
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| toml::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self) {
+        let dir = config_dir();
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        if let Ok(text) = toml::to_string(self) {
+            let _ = std::fs::write(dir.join("state.toml"), text);
+        }
+    }
+}
+
 impl Config {
     pub fn load() -> Self {
-        // XDG_CONFIG_HOME already IS the config dir; only append .config under $HOME
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| {
-                dirs::home_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("~"))
-                    .join(".config")
-            });
-        let path = base.join("deptty/config.toml");
+        let path = config_dir().join("config.toml");
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str(&text) {
                 Ok(cfg) => cfg,

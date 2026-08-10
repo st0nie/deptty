@@ -1197,6 +1197,15 @@ fn main() {
                 });
             }
             PaintWidgetEvent::Resize { w, h } => {
+                // ponytail: one tiny state.toml write per resize frame, no debounce;
+                // add a QTimer debounce if disk churn ever matters
+                if !smoke {
+                    config::State {
+                        window_width: Some(win.width()),
+                        window_height: Some(win.height()),
+                    }
+                    .save();
+                }
                 if let Some(sb) = *sb_slot.borrow() {
                     sb.as_widget().move_to(w - SB_W, TAB_H);
                     sb.as_widget().resize(SB_W, h - TAB_H);
@@ -1291,7 +1300,12 @@ fn main() {
     });
 
     win.set_central_widget(&pw.as_widget());
-    win.resize(80 * cell_w, 24 * cell_h + TAB_H);
+    // remember window size (deepin-terminal window_width/height, konsole state rc)
+    let st = config::State::load();
+    win.resize(
+        st.window_width.unwrap_or(80 * cell_w),
+        st.window_height.unwrap_or(24 * cell_h + TAB_H),
+    );
 
     let icon = QIcon::from_theme("deepin-terminal");
     win.set_window_icon(&icon);
