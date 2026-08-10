@@ -66,3 +66,16 @@ examples/      scratch probes
 
 The terminal widget itself is one `dtk::PaintWidget`; see ARCHITECTURE.md for
 the data flow.
+
+## Emoji
+
+Emoji render via fontconfig fallback to Noto Color Emoji. If they show as tofu
+boxes, install `fonts-noto-color-emoji` and add a strong fallback, e.g.
+`~/.config/fontconfig/conf.d/10-emoji-fallback.conf`:
+
+```xml
+<match target="pattern">
+  <test name="family"><string>monospace</string></test>
+  <edit name="family" mode="append" binding="strong"><string>Noto Color Emoji</string></edit>
+</match>
+```
