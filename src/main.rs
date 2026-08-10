@@ -1619,6 +1619,9 @@ fn main() {
                         assert!(w_long <= 450, "tab width {w_long} exceeds 450 cap");
                         let w_short = tabbar.tab_rect(0).width();
                         assert!(w_short >= 110, "tab width {w_short} below 110 floor");
+                        // no stale scroll-button gap left of the first tab
+                        // (startup latch regression: tabs must start at x=0)
+                        assert_eq!(tabbar.tab_rect(0).x(), 0, "stale scroll gap before first tab");
                     }
                     // OSC title -> tab label (sync happens on the next paint)
                     if !titled.replace(true) {
