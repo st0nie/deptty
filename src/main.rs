@@ -1103,6 +1103,10 @@ fn main() {
                     };
                     *streak.borrow_mut() = Some((now, pt.line.0, pt.column.0, count));
                     term.selection = Some(Selection::new(ty, pt, side));
+                    drop(term);
+                    if let Some(w) = &*view.borrow() {
+                        w.update();
+                    }
                 }
                 k if k == qt::mouse_kind::DOUBLE_CLICK && m.button == qt::mouse_button::LEFT => {
                     // double-click: semantic (word) selection; dragging keeps expanding by word

@@ -15,6 +15,7 @@ Working today:
 - scrollback scrollbar + mouse wheel, mouse reporting for vim/htop
 - window title from OSC 0/2, tab labels
 - config file at `~/.config/deptty/config.toml`
+- remembered window size (`state.toml`, like deepin-terminal's window_width/height)
 - headless smoke test (`--smoke`)
 
 Not yet: splits, search bar, themes/opacity, quake mode, remote management (SSH),
