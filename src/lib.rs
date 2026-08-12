@@ -61,9 +61,10 @@ impl alacritty_terminal::event::EventListener for TitleListener {
         // empty/reset titles are ignored on purpose: shells emit reset-then-set
         // around every prompt, applying the empty one flickers the tab label
         if let Event::Title(t) = ev
-            && !t.is_empty() {
-                *self.slot.lock().unwrap() = Some(t);
-            }
+            && !t.is_empty()
+        {
+            *self.slot.lock().unwrap() = Some(t);
+        }
     }
 }
 
@@ -367,7 +368,12 @@ impl Fonts {
         let bold_italic = make_font(cfg);
         bold_italic.set_bold(true);
         bold_italic.set_italic(true);
-        Self { normal, bold, italic, bold_italic }
+        Self {
+            normal,
+            bold,
+            italic,
+            bold_italic,
+        }
     }
 }
 
@@ -439,7 +445,10 @@ fn flush_run(
     // decorations span the whole run
     let w = run.chars().count() as i32 * g.cell_w;
     if !st.deco.is_empty() {
-        let lc = st.uline.map(|c| color_q(c, sc)).unwrap_or_else(|| color_q(st.fg, sc));
+        let lc = st
+            .uline
+            .map(|c| color_q(c, sc))
+            .unwrap_or_else(|| color_q(st.fg, sc));
         let lw = (g.cell_h / 12).max(1);
         let uy = y + g.ascent + 1; // just under the baseline
         if st.deco.contains(Flags::UNDERLINE) {
@@ -538,16 +547,30 @@ fn mouse_point(x: i32, y: i32, g: &GridGeom, term: &AppTerm) -> (Point, Side) {
     let row = (y / g.cell_h).clamp(0, term.grid().screen_lines() as i32 - 1);
     // the side (left/right half of the cell) is the anchor edge: dragging leftwards
     // must anchor on the right edge of the end cell, or that cell is excluded
-    let side = if x % g.cell_w < g.cell_w / 2 { Side::Left } else { Side::Right };
-    (Point::new(Line(row - term.grid().display_offset() as i32), Column(col)), side)
+    let side = if x % g.cell_w < g.cell_w / 2 {
+        Side::Left
+    } else {
+        Side::Right
+    };
+    (
+        Point::new(Line(row - term.grid().display_offset() as i32), Column(col)),
+        side,
+    )
 }
 
 /// SGR (1006) or X10 mouse report; x,y are 1-based screen cells.
 /// b: button + mods(shift 4, alt 8, ctrl 16) + 32 motion + 64 wheel; release = 'm'/button 3
 fn mouse_mods(mods: i32) -> i32 {
-    (if mods & qt::modifier::SHIFT != 0 { 4 } else { 0 })
-        | (if mods & qt::modifier::ALT != 0 { 8 } else { 0 })
-        | (if mods & qt::modifier::CONTROL != 0 { 16 } else { 0 })
+    (if mods & qt::modifier::SHIFT != 0 {
+        4
+    } else {
+        0
+    }) | (if mods & qt::modifier::ALT != 0 { 8 } else { 0 })
+        | (if mods & qt::modifier::CONTROL != 0 {
+            16
+        } else {
+            0
+        })
 }
 
 fn mouse_report(term: &AppTerm, b: i32, col: usize, row: i32, press: bool) -> Vec<u8> {
@@ -570,11 +593,12 @@ fn mouse_report(term: &AppTerm, b: i32, col: usize, row: i32, press: bool) -> Ve
 fn find_url_span(text: &str, col: usize) -> Option<(usize, usize)> {
     let chars: Vec<char> = text.chars().collect();
     let delim = |c: char| {
-        matches!(c, ' ' | '\t' | '"' | '\'' | '<' | '>' | '`' | '|' | '(' | ')' | '[' | ']' | '{' | '}')
+        matches!(
+            c,
+            ' ' | '\t' | '"' | '\'' | '<' | '>' | '`' | '|' | '(' | ')' | '[' | ']' | '{' | '}'
+        )
     };
-    let starts = |i: usize, pat: &str| {
-        chars[i..].iter().take(pat.len()).copied().eq(pat.chars())
-    };
+    let starts = |i: usize, pat: &str| chars[i..].iter().take(pat.len()).copied().eq(pat.chars());
     let mut i = 0;
     while i + 7 <= chars.len() {
         let (https, hit) = (starts(i, "https://"), starts(i, "http://"));
@@ -606,7 +630,13 @@ fn url_at(term: &AppTerm, line: i32, col: usize) -> Option<(String, usize, usize
             continue;
         }
         let c = indexed.cell.c;
-        chars.push(if c == '\0' || indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) { ' ' } else { c });
+        chars.push(
+            if c == '\0' || indexed.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                ' '
+            } else {
+                c
+            },
+        );
     }
     let text: String = chars.iter().collect();
     let (s, e) = find_url_span(&text, col)?;
@@ -692,7 +722,38 @@ fn snapshot_grid(term: &AppTerm) -> GridSnap {
             cell: indexed.cell.clone(),
         });
     }
-    GridSnap { cells, cursor, offset, sel }
+    GridSnap {
+        cells,
+        cursor,
+        offset,
+        sel,
+    }
+}
+
+/// text cursor presentation for one paint: `shape` from config, `focused` =
+/// this pane has input focus. Unfocused panes draw a hollow block whatever the
+/// configured shape (deepin-terminal focus hint); ponytail: no blink
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cursor {
+    pub shape: config::CursorShape,
+    pub focused: bool,
+}
+
+/// cursor overlay rects, cell-local px (x, y, w, h)
+fn cursor_rects(cur: Cursor, cw: i32, ch: i32) -> Vec<(i32, i32, i32, i32)> {
+    use config::CursorShape::*;
+    let t = (ch / 8).max(1); // stroke/line thickness
+    match (cur.focused, cur.shape) {
+        (true, Block) => vec![(0, 0, cw, ch)],
+        (true, Beam) => vec![(0, 0, t, ch)],
+        (true, Underline) => vec![(0, ch - t, cw, t)],
+        (false, _) => vec![
+            (0, 0, cw, t),
+            (0, ch - t, cw, t),
+            (0, 0, t, ch),
+            (cw - t, 0, t, ch),
+        ],
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -704,11 +765,18 @@ fn render(
     w: i32,
     h: i32,
     y_off: i32,
+    cur: Cursor,
 ) {
     let sc = scheme();
     p.set_font(&fonts.normal);
     // paint the whole viewport: default-bg cells must match the scheme, not the widget bg
-    p.fill_rect(0, y_off, w, h - y_off, &color_q(Color::Named(NamedColor::Background), &sc));
+    p.fill_rect(
+        0,
+        y_off,
+        w,
+        h - y_off,
+        &color_q(Color::Named(NamedColor::Background), &sc),
+    );
     let mut run = String::new();
     let mut run_line = -1i64;
     let mut run_col = 0usize;
@@ -735,12 +803,16 @@ fn render(
             && i64::from(cursor.line.0) == line
             && (cur_col == col || (wide && cur_col == col + 1));
         let selected = sel.is_some_and(|r| r.contains(cs.point));
-        if is_cursor || selected || !matches!(bg, Color::Named(NamedColor::Background)) {
-            // ponytail: block cursor = translucent overlay, no blink
+        if is_cursor {
             let (o_r, o_g, o_b) = if sc.dark { (255, 255, 255) } else { (0, 0, 0) };
-            let q = if is_cursor {
-                QColor::rgba(o_r, o_g, o_b, 110)
-            } else if selected {
+            let q = QColor::rgba(o_r, o_g, o_b, 110);
+            let (cx, cy) = (col as i32 * g.cell_w, y_off + line as i32 * g.cell_h);
+            for (rx, ry, rw, rh) in cursor_rects(cur, span * g.cell_w, g.cell_h) {
+                p.fill_rect(cx + rx, cy + ry, rw, rh, &q);
+            }
+        } else if selected || !matches!(bg, Color::Named(NamedColor::Background)) {
+            let (o_r, o_g, o_b) = if sc.dark { (255, 255, 255) } else { (0, 0, 0) };
+            let q = if selected {
                 QColor::rgba(o_r, o_g, o_b, 60)
             } else {
                 color_q(bg, &sc)
@@ -759,7 +831,11 @@ fn render(
         // spaces and HIDDEN (SGR 8) cells join the run as blanks: glyphs are
         // invisible either way, but decorations (strikeout/underline) must not
         // break at every space — alacritty draws them continuously
-        let c = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
+        let c = if cell.flags.contains(Flags::HIDDEN) {
+            ' '
+        } else {
+            cell.c
+        };
         if !c.is_ascii() {
             // fallback-font glyphs (powerline, CJK, ...) have advance != cell width:
             // draw them pinned to their cell or every glyph after them drifts
@@ -775,7 +851,12 @@ fn render(
             let mut buf = [0u8; 4];
             // fallback glyphs can exceed the cell (box-drawing, CJK): clip or rows overlap
             p.save();
-            p.set_clip_rect(col as i32 * g.cell_w, y_off + line as i32 * g.cell_h, span * g.cell_w, g.cell_h);
+            p.set_clip_rect(
+                col as i32 * g.cell_w,
+                y_off + line as i32 * g.cell_h,
+                span * g.cell_w,
+                g.cell_h,
+            );
             p.draw_text_at(
                 col as i32 * g.cell_w,
                 y_off + line as i32 * g.cell_h + g.ascent,
@@ -853,7 +934,11 @@ fn split_geometry(
     y: i32,
     w: i32,
     h: i32,
-) -> ((i32, i32, i32, i32), (i32, i32, i32, i32), (i32, i32, i32, i32)) {
+) -> (
+    (i32, i32, i32, i32),
+    (i32, i32, i32, i32),
+    (i32, i32, i32, i32),
+) {
     if vertical {
         let aw = ((w - DIV).max(0) as f64 * ratio) as i32;
         (
@@ -881,7 +966,10 @@ pub struct Tab {
 
 impl Tab {
     pub fn pane(&self, id: u64) -> &Pane {
-        self.panes.iter().find(|p| p.id == id).expect("pane id in tree")
+        self.panes
+            .iter()
+            .find(|p| p.id == id)
+            .expect("pane id in tree")
     }
     pub fn active(&self) -> &Pane {
         self.pane(self.active_pane.get())
@@ -933,7 +1021,9 @@ fn replace_leaf(node: &mut Node, id: u64, new: Node) -> bool {
 /// remove leaf `id`, collapsing its parent split into the sibling.
 /// Root-leaf case is the caller's (the whole tab goes away).
 fn remove_leaf(node: &mut Node, id: u64) -> bool {
-    let Node::Split { a, b, .. } = node else { return false };
+    let Node::Split { a, b, .. } = node else {
+        return false;
+    };
     if matches!(a.as_ref(), Node::Leaf(i) if *i == id) {
         let sib = std::mem::replace(b, Box::new(Node::Empty));
         *node = *sib;
@@ -951,7 +1041,13 @@ fn remove_leaf(node: &mut Node, id: u64) -> bool {
 fn rect_of(node: &Node, id: u64, x: i32, y: i32, w: i32, h: i32) -> Option<(i32, i32, i32, i32)> {
     match node {
         Node::Leaf(i) => (*i == id).then_some((x, y, w, h)),
-        Node::Split { vertical, ratio, a, b, .. } => {
+        Node::Split {
+            vertical,
+            ratio,
+            a,
+            b,
+            ..
+        } => {
             let (ra, rb, _) = split_geometry(*vertical, ratio.get(), x, y, w, h);
             rect_of(a, id, ra.0, ra.1, ra.2, ra.3)
                 .or_else(|| rect_of(b, id, rb.0, rb.1, rb.2, rb.3))
@@ -970,7 +1066,14 @@ fn dividers_of(
     h: i32,
     out: &mut Vec<(u64, bool, (i32, i32, i32, i32), (i32, i32, i32, i32))>,
 ) {
-    if let Node::Split { id, vertical, ratio, a, b } = node {
+    if let Node::Split {
+        id,
+        vertical,
+        ratio,
+        a,
+        b,
+    } = node
+    {
         let (ra, rb, band) = split_geometry(*vertical, ratio.get(), x, y, w, h);
         out.push((*id, *vertical, (x, y, w, h), band));
         dividers_of(a, ra.0, ra.1, ra.2, ra.3, out);
@@ -989,7 +1092,13 @@ fn find_divider(
     h: i32,
 ) -> Option<(&Cell<f64>, bool, (i32, i32, i32, i32))> {
     match node {
-        Node::Split { id: i, vertical, ratio, a, b } => {
+        Node::Split {
+            id: i,
+            vertical,
+            ratio,
+            a,
+            b,
+        } => {
             let (ra, rb, _) = split_geometry(*vertical, ratio.get(), x, y, w, h);
             if *i == id {
                 Some((ratio, *vertical, (x, y, w, h)))
@@ -1006,6 +1115,129 @@ fn point_in(r: (i32, i32, i32, i32), x: i32, y: i32, slack: i32) -> bool {
     x >= r.0 - slack && x < r.0 + r.2 + slack && y >= r.1 - slack && y < r.1 + r.3 + slack
 }
 
+/// leaf pane ids in tree (visual) order: left-to-right, top-to-bottom
+fn leaf_ids(node: &Node, out: &mut Vec<u64>) {
+    match node {
+        Node::Leaf(id) => out.push(*id),
+        Node::Split { a, b, .. } => {
+            leaf_ids(a, out);
+            leaf_ids(b, out);
+        }
+        Node::Empty => {}
+    }
+}
+
+/// equal-share units along axis `vertical` in this subtree: a same-axis split
+/// flattens into its children's units, anything else counts as one unit
+/// equal-share units along axis `vertical` in this subtree: a same-axis split
+/// flattens into its children's units, anything else (leaf or a split on the
+/// other axis) is one unit — a vertical column inside a horizontal strip
+/// occupies exactly one slot of that strip
+fn axis_units(node: &Node, vertical: bool) -> usize {
+    match node {
+        Node::Split {
+            vertical: v, a, b, ..
+        } if *v == vertical => axis_units(a, vertical) + axis_units(b, vertical),
+        Node::Empty => 0,
+        _ => 1,
+    }
+}
+
+/// reset ratios so every same-axis strip splits its space into equal units
+/// (deepin-terminal: N splits along one axis -> each pane gets 1/N)
+fn equalize_axis(node: &mut Node, vertical: bool) {
+    let Node::Split {
+        vertical: v,
+        ratio,
+        a,
+        b,
+        ..
+    } = node
+    else {
+        return;
+    };
+    if *v == vertical {
+        let total = axis_units(a, vertical) + axis_units(b, vertical);
+        if total > 0 {
+            ratio.set(axis_units(a, vertical) as f64 / total as f64);
+        }
+    }
+    equalize_axis(a, vertical);
+    equalize_axis(b, vertical);
+}
+
+/// orientation of the split node directly holding leaf `id`
+fn parent_axis(node: &Node, id: u64) -> Option<bool> {
+    match node {
+        Node::Split { vertical, a, b, .. } => {
+            if matches!(a.as_ref(), Node::Leaf(l) if *l == id)
+                || matches!(b.as_ref(), Node::Leaf(l) if *l == id)
+            {
+                return Some(*vertical);
+            }
+            parent_axis(a, id).or_else(|| parent_axis(b, id))
+        }
+        _ => None,
+    }
+}
+
+/// first leaf of the sibling subtree sharing `id`'s parent split: the focus
+/// target when `id` closes (deepin-terminal WidgetTreeReverseFindTerm: first
+/// remaining terminal in the same splitter, walking up the tree)
+fn focus_fallback(node: &Node, id: u64) -> Option<u64> {
+    match node {
+        Node::Split { a, b, .. } => {
+            if matches!(a.as_ref(), Node::Leaf(l) if *l == id) {
+                return first_leaf(b);
+            }
+            if matches!(b.as_ref(), Node::Leaf(l) if *l == id) {
+                return first_leaf(a);
+            }
+            focus_fallback(a, id).or_else(|| focus_fallback(b, id))
+        }
+        _ => None,
+    }
+}
+
+/// nearest pane in direction (dx, dy) from `cur`: strictly past the edge on
+/// the dominant axis, shortest center distance (deepin-terminal focusNavigation)
+fn dir_target(rects: &[(u64, (i32, i32, i32, i32))], cur: u64, dx: i32, dy: i32) -> Option<u64> {
+    let &(_, cr) = rects.iter().find(|(id, _)| *id == cur)?;
+    let cc = (cr.0 + cr.2 / 2, cr.1 + cr.3 / 2);
+    let mut best: Option<(i64, u64)> = None;
+    for &(id, r) in rects {
+        if id == cur {
+            continue;
+        }
+        let c = (r.0 + r.2 / 2, r.1 + r.3 / 2);
+        let (ddx, ddy) = (c.0 - cc.0, c.1 - cc.1);
+        let ok = match (dx, dy) {
+            (1, 0) => ddx > 0 && ddy.abs() < ddx,
+            (-1, 0) => ddx < 0 && ddy.abs() < -ddx,
+            (0, 1) => ddy > 0 && ddx.abs() < ddy,
+            (0, -1) => ddy < 0 && ddx.abs() < -ddy,
+            _ => false,
+        };
+        if !ok {
+            continue;
+        }
+        let d2 = i64::from(ddx) * i64::from(ddx) + i64::from(ddy) * i64::from(ddy);
+        if best.is_none_or(|(bd, _)| d2 < bd) {
+            best = Some((d2, id));
+        }
+    }
+    best.map(|(_, id)| id)
+}
+
+/// first configured binding matching (key, mods): the Ctrl/Shift/Alt mask must
+/// match the binding exactly, same rule the key handler uses
+pub fn match_action(cfg: &Config, key: i32, mods: i32) -> Option<config::Action> {
+    cfg.key_bindings
+        .iter()
+        .find(|b| b.key_code() == Some(key) && mods & MOD_MASK == b.mod_mask())
+        .map(|b| b.action)
+}
+
 /// splits are ratio-draggable; divider bands are painted by the root widget
 fn layout_tree(tab: &Tab, node: &Node, x: i32, y: i32, w: i32, h: i32) {
     match node {
@@ -1016,7 +1248,13 @@ fn layout_tree(tab: &Tab, node: &Node, x: i32, y: i32, w: i32, h: i32) {
             p.pw.as_widget().move_to(x, y);
             p.pw.as_widget().resize(w.max(1), h.max(1));
         }
-        Node::Split { vertical, ratio, a, b, .. } => {
+        Node::Split {
+            vertical,
+            ratio,
+            a,
+            b,
+            ..
+        } => {
             let (ra, rb, _) = split_geometry(*vertical, ratio.get(), x, y, w, h);
             layout_tree(tab, a, ra.0, ra.1, ra.2, ra.3);
             layout_tree(tab, b, rb.0, rb.1, rb.2, rb.3);
@@ -1089,7 +1327,12 @@ fn shell_cmd(cfg: &Config) -> CommandBuilder {
 
 /// term + pty + reader thread; the reader pokes the GUI over a socketpair,
 /// one byte per event ('x' output, 'q' shell gone)
-fn spawn_shell(cfg: &Config, cols: usize, lines: usize, cwd: Option<String>) -> (Arc<Shared>, u32, &'static mut UnixStream) {
+fn spawn_shell(
+    cfg: &Config,
+    cols: usize,
+    lines: usize,
+    cwd: Option<String>,
+) -> (Arc<Shared>, u32, &'static mut UnixStream) {
     let title_slot = Arc::new(Mutex::new(None::<String>));
     let term = Term::new(
         term::Config {
@@ -1097,7 +1340,9 @@ fn spawn_shell(cfg: &Config, cols: usize, lines: usize, cwd: Option<String>) -> 
             ..Default::default()
         },
         &Size { cols, lines },
-        TitleListener { slot: title_slot.clone() },
+        TitleListener {
+            slot: title_slot.clone(),
+        },
     );
     let shared = Arc::new(Shared {
         term: FairMutex::new(term),
@@ -1207,17 +1452,26 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
                 let focus_pw = {
                     let mut ts = app.tabs.borrow_mut();
                     let tab = &mut ts[ti];
+                    // deepin-terminal closeSplit (WidgetTreeReverseFindTerm): focus
+                    // the first remaining terminal of the same split group — not
+                    // the global top-left leaf
+                    let fallback = focus_fallback(&tab.tree, pane_id);
+                    let axis = parent_axis(&tab.tree, pane_id);
                     remove_leaf(&mut tab.tree, pane_id);
+                    if let Some(axis) = axis {
+                        equalize_axis(&mut tab.tree, axis); // closing a third leaves halves
+                    }
                     if let Some(pos) = tab.panes.iter().position(|p| p.id == pane_id) {
                         let p = tab.panes.remove(pos);
                         p.pw.as_widget().delete_later(); // takes the scrollbar child with it
                     }
                     let mut focus = None;
                     if tab.active_pane.get() == pane_id
-                        && let Some(nid) = first_leaf(&tab.tree) {
-                            tab.active_pane.set(nid);
-                            focus = Some(tab.pane(nid).pw);
-                        }
+                        && let Some(nid) = fallback
+                    {
+                        tab.active_pane.set(nid);
+                        focus = Some(tab.pane(nid).pw);
+                    }
                     layout_tab(tab);
                     focus
                 };
@@ -1231,18 +1485,23 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
             // reset->set bursts (prompt redraw after every command) collapse to
             // the latest value, so transient titles never reach the tab
             if me.title.lock().unwrap().is_some()
-                && !me.title_armed.swap(true, std::sync::atomic::Ordering::SeqCst)
+                && !me
+                    .title_armed
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
             {
                 let me = me.clone();
                 let app = app.clone();
                 QTimer::single_shot(30, move || {
-                    me.title_armed.store(false, std::sync::atomic::Ordering::SeqCst);
+                    me.title_armed
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
                     let t = me.title.lock().unwrap().take();
                     if let Some(t) = t {
                         let ts = app.tabs.borrow();
-                        if let Some((ti, tab)) = ts.iter().enumerate().find(|(_, t)| {
-                            t.panes.iter().any(|p| Arc::ptr_eq(&p.shared, &me))
-                        }) {
+                        if let Some((ti, tab)) = ts
+                            .iter()
+                            .enumerate()
+                            .find(|(_, t)| t.panes.iter().any(|p| Arc::ptr_eq(&p.shared, &me)))
+                        {
                             // tab label follows the focused pane's title
                             if tab.panes.iter().any(|p| Arc::ptr_eq(&p.shared, &me))
                                 && tab.active_pane.get()
@@ -1265,9 +1524,10 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
             let ts = app.tabs.borrow();
             if ti == app.active.get()
                 && let Some(tab) = ts.get(ti)
-                    && let Some(p) = tab.panes.iter().find(|p| Arc::ptr_eq(&p.shared, &me)) {
-                        p.pw.update();
-                    }
+                && let Some(p) = tab.panes.iter().find(|p| Arc::ptr_eq(&p.shared, &me))
+            {
+                p.pw.update();
+            }
         }
     });
     notifier.leak();
@@ -1285,7 +1545,11 @@ fn paste(shared: &Arc<Shared>) {
     if text.is_empty() {
         return;
     }
-    let bracketed = shared.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+    let bracketed = shared
+        .term
+        .lock()
+        .mode()
+        .contains(TermMode::BRACKETED_PASTE);
     let mut w = shared.writer.lock().unwrap();
     if bracketed {
         let _ = w.write_all(b"\x1b[200~");
@@ -1366,7 +1630,14 @@ pub fn context_menu(app: &App, pane_id: u64, at: &QWidget, x: i32, y: i32) {
 }
 
 /// paint + input widget for one pane; the handler closes over the pane's own shell
-fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: u32, gui_read: &'static mut UnixStream) -> Pane {
+fn make_pane(
+    app: &App,
+    container: &QWidget,
+    id: u64,
+    shared: Arc<Shared>,
+    pid: u32,
+    gui_read: &'static mut UnixStream,
+) -> Pane {
     let pw_slot = Rc::new(RefCell::new(None::<PaintWidget>));
     let sb_slot = Rc::new(RefCell::new(None::<ScrollBar>));
     let syncing_sb = Rc::new(Cell::new(false));
@@ -1403,7 +1674,11 @@ fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: 
                     (row, col, url_at(&term, row, col).is_some())
                 };
                 // underline on any hover; clickable (pointing hand) only with Ctrl
-                let shape = if over && ctrl { qt::cursor::POINTING_HAND } else { qt::cursor::IBEAM };
+                let shape = if over && ctrl {
+                    qt::cursor::POINTING_HAND
+                } else {
+                    qt::cursor::IBEAM
+                };
                 if shape != cur_shape.get() {
                     cur_shape.set(shape);
                     if let Some(w) = &*pw_slot.borrow() {
@@ -1419,9 +1694,7 @@ fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: 
             }
         };
         // click streak for double/triple click: (when, line, col, count)
-        let streak = Rc::new(RefCell::new(
-            None::<(std::time::Instant, i32, usize, u8)>,
-        ));
+        let streak = Rc::new(RefCell::new(None::<(std::time::Instant, i32, usize, u8)>));
         let pane_rect_h = pane_rect.clone();
         // active divider drag initiated from this pane's slack zone
         let pane_drag = Rc::new(Cell::new(None::<u64>));
@@ -1433,7 +1706,17 @@ fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: 
                     let term = shared.term.lock();
                     snapshot_grid(&term)
                 };
-                render(&snap, &p, &geom, &fonts, w, h, 0);
+                let focused = {
+                    let ts = app.tabs.borrow();
+                    ts.iter()
+                        .find(|t| t.panes.iter().any(|p| p.id == id))
+                        .is_some_and(|t| t.active_pane.get() == id)
+                };
+                let cur = Cursor {
+                    shape: app.cfg.cursor_shape,
+                    focused,
+                };
+                render(&snap, &p, &geom, &fonts, w, h, 0, cur);
                 // hovered link underline: span recomputed from this frame's
                 // snapshot (mouse-over, deepin-terminal style)
                 if let Some((line, col)) = hover.get() {
@@ -1444,7 +1727,13 @@ fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: 
                             continue;
                         }
                         let c = cs.cell.c;
-                        chars.push(if c == '\0' || cs.cell.flags.contains(Flags::WIDE_CHAR_SPACER) { ' ' } else { c });
+                        chars.push(
+                            if c == '\0' || cs.cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                                ' '
+                            } else {
+                                c
+                            },
+                        );
                     }
                     let text: String = chars.iter().collect();
                     if let Some((s, e)) = find_url_span(&text, col) {
@@ -1467,14 +1756,15 @@ fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: 
                 let cur = snap.cursor;
                 let row = cur.line.0 + snap.offset as i32;
                 if row >= 0
-                    && let Some(w) = &*pw_slot.borrow() {
-                        w.set_ime_cursor_rect(
-                            cur.column.0 as i32 * geom.cell_w,
-                            row * geom.cell_h,
-                            geom.cell_w,
-                            geom.cell_h,
-                        );
-                    }
+                    && let Some(w) = &*pw_slot.borrow()
+                {
+                    w.set_ime_cursor_rect(
+                        cur.column.0 as i32 * geom.cell_w,
+                        row * geom.cell_h,
+                        geom.cell_w,
+                        geom.cell_h,
+                    );
+                }
             }
             // Ctrl press/release over a link toggles the clickable cursor even
             // without a mouse move
@@ -1484,12 +1774,7 @@ fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: 
             }
             PaintWidgetEvent::Key(k) if k.press => {
                 // configurable bindings first (alacritty-style [[key_binding]])
-                let hit = app
-                    .cfg
-                    .key_bindings
-                    .iter()
-                    .find(|b| b.key_code() == Some(k.key) && k.mods & MOD_MASK == b.mod_mask())
-                    .map(|b| b.action);
+                let hit = match_action(&app.cfg, k.key, k.mods);
                 if let Some(action) = hit {
                     use config::Action::*;
                     match action {
@@ -1516,6 +1801,12 @@ fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: 
                         SplitVertical => {
                             split_pane(&app, id, true);
                         }
+                        NextPane => cycle_pane(&app, 1),
+                        PrevPane => cycle_pane(&app, -1),
+                        FocusPaneUp => focus_pane_dir(&app, 0, -1),
+                        FocusPaneDown => focus_pane_dir(&app, 0, 1),
+                        FocusPaneLeft => focus_pane_dir(&app, -1, 0),
+                        FocusPaneRight => focus_pane_dir(&app, 1, 0),
                     }
                     return;
                 }
@@ -1540,135 +1831,151 @@ fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: 
                     return; // app owns the mouse (vim/htop): no local selection
                 }
                 match m.kind {
-                k if k == qt::mouse_kind::PRESS && m.button == qt::mouse_button::RIGHT => {
-                    if let Some(w) = &*pw_slot.borrow() {
-                        context_menu(&app, id, &w.as_widget(), m.x, m.y);
+                    k if k == qt::mouse_kind::PRESS && m.button == qt::mouse_button::RIGHT => {
+                        if let Some(w) = &*pw_slot.borrow() {
+                            context_menu(&app, id, &w.as_widget(), m.x, m.y);
+                        }
                     }
-                }
-                k if k == qt::mouse_kind::PRESS && m.button == qt::mouse_button::LEFT => {
-                    // divider slack zone: drag the divider instead of selecting
-                    let (px, py, _, _) = pane_rect_h.get();
-                    let host = pw_slot.borrow().map(|w| w.as_widget());
-                    if let Some(host) = host
-                        && divider_mouse(&app, &pane_drag, &host, m.kind, m.button, px + m.x, py + m.y) {
+                    k if k == qt::mouse_kind::PRESS && m.button == qt::mouse_button::LEFT => {
+                        // divider slack zone: drag the divider instead of selecting
+                        let (px, py, _, _) = pane_rect_h.get();
+                        let host = pw_slot.borrow().map(|w| w.as_widget());
+                        if let Some(host) = host
+                            && divider_mouse(
+                                &app,
+                                &pane_drag,
+                                &host,
+                                m.kind,
+                                m.button,
+                                px + m.x,
+                                py + m.y,
+                            )
+                        {
                             return;
                         }
-                    if let Some(w) = &*pw_slot.borrow() {
-                        w.set_focus();
-                    }
-                    // Ctrl+click on a link opens it in the browser (deepin-terminal)
-                    if m.mods & qt::modifier::CONTROL != 0 {
-                        let term = shared.term.lock();
-                        let col = (m.x / geom.cell_w).clamp(0, term.grid().columns() as i32 - 1) as usize;
-                        let row = (m.y / geom.cell_h).clamp(0, term.grid().screen_lines() as i32 - 1);
-                        if let Some((url, _, _)) = url_at(&term, row, col) {
-                            drop(term);
-                            open_url(&url);
-                            return;
+                        if let Some(w) = &*pw_slot.borrow() {
+                            w.set_focus();
                         }
-                    }
-                    selecting.set(true);
-                    let mut term = shared.term.lock();
-                    let (pt, side) = mouse_point(m.x, m.y, &geom, &term);
-                    let now = std::time::Instant::now();
-                    // rapid re-click on the same cell: even streaks (3rd, 5th... click
-                    // arrives as PRESS) select whole lines, cycling with word select
-                    let prev = *streak.borrow();
-                    let (ty, count) = match prev {
-                        Some((t, l, c, n))
-                            if now.duration_since(t) < std::time::Duration::from_millis(500)
-                                && l == pt.line.0
-                                && c == pt.column.0
-                                && n % 2 == 0 =>
-                        {
-                            (SelectionType::Lines, n + 1)
-                        }
-                        _ => (SelectionType::Simple, 1),
-                    };
-                    *streak.borrow_mut() = Some((now, pt.line.0, pt.column.0, count));
-                    term.selection = Some(Selection::new(ty, pt, side));
-                    drop(term);
-                    if let Some(w) = &*pw_slot.borrow() {
-                        w.update();
-                    }
-                }
-                k if k == qt::mouse_kind::DOUBLE_CLICK && m.button == qt::mouse_button::LEFT => {
-                    // double-click: semantic (word) selection; dragging keeps expanding by word
-                    selecting.set(true);
-                    let mut term = shared.term.lock();
-                    let (pt, _) = mouse_point(m.x, m.y, &geom, &term);
-                    let now = std::time::Instant::now();
-                    let count = match *streak.borrow() {
-                        Some((t, l, c, n))
-                            if now.duration_since(t) < std::time::Duration::from_millis(500)
-                                && l == pt.line.0
-                                && c == pt.column.0 =>
-                        {
-                            n + 1
-                        }
-                        _ => 2,
-                    };
-                    *streak.borrow_mut() = Some((now, pt.line.0, pt.column.0, count));
-                    term.selection = Some(Selection::new(SelectionType::Semantic, pt, Side::Left));
-                    drop(term);
-                    if let Some(w) = &*pw_slot.borrow() {
-                        w.update();
-                    }
-                }
-                k if k == qt::mouse_kind::MOVE && pane_drag.get().is_some() => {
-                    let (px, py, _, _) = pane_rect_h.get();
-                    divider_drag(&app, pane_drag.get().unwrap(), px + m.x, py + m.y);
-                }
-                k if k == qt::mouse_kind::MOVE && selecting.get() => {
-                    {
-                        let mut term = shared.term.lock();
-                        let (pt, side) = mouse_point(m.x, m.y, &geom, &term);
-                        if let Some(sel) = &mut term.selection {
-                            sel.update(pt, side);
-                        }
-                    }
-                    if let Some(w) = &*pw_slot.borrow() {
-                        w.update();
-                    }
-                }
-                k if k == qt::mouse_kind::MOVE => {
-                    mpos.set((m.x, m.y));
-                    // near a divider (incl. the pane-side slack): resize cursor;
-                    // the band itself is container territory, cursor inherited from root
-                    let (px, py, _, _) = pane_rect_h.get();
-                    match divider_at(&app, px + m.x, py + m.y) {
-                        Some((_, vertical)) => {
-                            let shape = if vertical {
-                                qt::cursor::SIZE_HOR // vertical line drags ↔
-                            } else {
-                                qt::cursor::SIZE_VER // horizontal line drags ↕
-                            };
-                            if shape != cur_shape.get() {
-                                cur_shape.set(shape);
-                                if let Some(w) = &*pw_slot.borrow() {
-                                    w.as_widget().set_cursor(shape);
-                                }
+                        // Ctrl+click on a link opens it in the browser (deepin-terminal)
+                        if m.mods & qt::modifier::CONTROL != 0 {
+                            let term = shared.term.lock();
+                            let col = (m.x / geom.cell_w).clamp(0, term.grid().columns() as i32 - 1)
+                                as usize;
+                            let row =
+                                (m.y / geom.cell_h).clamp(0, term.grid().screen_lines() as i32 - 1);
+                            if let Some((url, _, _)) = url_at(&term, row, col) {
+                                drop(term);
+                                open_url(&url);
+                                return;
                             }
                         }
-                        // link hover: underline on mouse-over (no Ctrl needed), like
-                        // deepin-terminal; Ctrl is only required for the click
-                        None => update_hover(m.x, m.y, m.mods & qt::modifier::CONTROL != 0),
-                    }
-                }
-                k if k == qt::mouse_kind::RELEASE && m.button == qt::mouse_button::LEFT => {
-                    if pane_drag.replace(None).is_some() {
-                        return; // divider drag ended; hover fixes the cursor
-                    }
-                    selecting.set(false);
-                    let mut term = shared.term.lock();
-                    if term.selection.as_ref().is_some_and(Selection::is_empty) {
-                        term.selection = None; // bare click: no selection
+                        selecting.set(true);
+                        let mut term = shared.term.lock();
+                        let (pt, side) = mouse_point(m.x, m.y, &geom, &term);
+                        let now = std::time::Instant::now();
+                        // rapid re-click on the same cell: even streaks (3rd, 5th... click
+                        // arrives as PRESS) select whole lines, cycling with word select
+                        let prev = *streak.borrow();
+                        let (ty, count) = match prev {
+                            Some((t, l, c, n))
+                                if now.duration_since(t)
+                                    < std::time::Duration::from_millis(500)
+                                    && l == pt.line.0
+                                    && c == pt.column.0
+                                    && n % 2 == 0 =>
+                            {
+                                (SelectionType::Lines, n + 1)
+                            }
+                            _ => (SelectionType::Simple, 1),
+                        };
+                        *streak.borrow_mut() = Some((now, pt.line.0, pt.column.0, count));
+                        term.selection = Some(Selection::new(ty, pt, side));
+                        drop(term);
                         if let Some(w) = &*pw_slot.borrow() {
                             w.update();
                         }
                     }
-                }
-                _ => {}
+                    k if k == qt::mouse_kind::DOUBLE_CLICK
+                        && m.button == qt::mouse_button::LEFT =>
+                    {
+                        // double-click: semantic (word) selection; dragging keeps expanding by word
+                        selecting.set(true);
+                        let mut term = shared.term.lock();
+                        let (pt, _) = mouse_point(m.x, m.y, &geom, &term);
+                        let now = std::time::Instant::now();
+                        let count = match *streak.borrow() {
+                            Some((t, l, c, n))
+                                if now.duration_since(t)
+                                    < std::time::Duration::from_millis(500)
+                                    && l == pt.line.0
+                                    && c == pt.column.0 =>
+                            {
+                                n + 1
+                            }
+                            _ => 2,
+                        };
+                        *streak.borrow_mut() = Some((now, pt.line.0, pt.column.0, count));
+                        term.selection =
+                            Some(Selection::new(SelectionType::Semantic, pt, Side::Left));
+                        drop(term);
+                        if let Some(w) = &*pw_slot.borrow() {
+                            w.update();
+                        }
+                    }
+                    k if k == qt::mouse_kind::MOVE && pane_drag.get().is_some() => {
+                        let (px, py, _, _) = pane_rect_h.get();
+                        divider_drag(&app, pane_drag.get().unwrap(), px + m.x, py + m.y);
+                    }
+                    k if k == qt::mouse_kind::MOVE && selecting.get() => {
+                        {
+                            let mut term = shared.term.lock();
+                            let (pt, side) = mouse_point(m.x, m.y, &geom, &term);
+                            if let Some(sel) = &mut term.selection {
+                                sel.update(pt, side);
+                            }
+                        }
+                        if let Some(w) = &*pw_slot.borrow() {
+                            w.update();
+                        }
+                    }
+                    k if k == qt::mouse_kind::MOVE => {
+                        mpos.set((m.x, m.y));
+                        // near a divider (incl. the pane-side slack): resize cursor;
+                        // the band itself is container territory, cursor inherited from root
+                        let (px, py, _, _) = pane_rect_h.get();
+                        match divider_at(&app, px + m.x, py + m.y) {
+                            Some((_, vertical)) => {
+                                let shape = if vertical {
+                                    qt::cursor::SIZE_HOR // vertical line drags ↔
+                                } else {
+                                    qt::cursor::SIZE_VER // horizontal line drags ↕
+                                };
+                                if shape != cur_shape.get() {
+                                    cur_shape.set(shape);
+                                    if let Some(w) = &*pw_slot.borrow() {
+                                        w.as_widget().set_cursor(shape);
+                                    }
+                                }
+                            }
+                            // link hover: underline on mouse-over (no Ctrl needed), like
+                            // deepin-terminal; Ctrl is only required for the click
+                            None => update_hover(m.x, m.y, m.mods & qt::modifier::CONTROL != 0),
+                        }
+                    }
+                    k if k == qt::mouse_kind::RELEASE && m.button == qt::mouse_button::LEFT => {
+                        if pane_drag.replace(None).is_some() {
+                            return; // divider drag ended; hover fixes the cursor
+                        }
+                        selecting.set(false);
+                        let mut term = shared.term.lock();
+                        if term.selection.as_ref().is_some_and(Selection::is_empty) {
+                            term.selection = None; // bare click: no selection
+                            if let Some(w) = &*pw_slot.borrow() {
+                                w.update();
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
             PaintWidgetEvent::Wheel { dy, x, y, mods } => {
@@ -1676,7 +1983,8 @@ fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: 
                     let term = shared.term.lock();
                     if term.mode().intersects(TermMode::MOUSE_MODE) {
                         // wheel as button 64/65 presses, one per notch
-                        let col = (x / geom.cell_w).clamp(0, term.grid().columns() as i32 - 1) as usize;
+                        let col =
+                            (x / geom.cell_w).clamp(0, term.grid().columns() as i32 - 1) as usize;
                         let row = (y / geom.cell_h).clamp(0, term.grid().screen_lines() as i32 - 1);
                         let b = 64 + mouse_mods(mods) + i32::from(dy < 0);
                         let n = (dy.abs() / 120).max(1);
@@ -1699,9 +2007,19 @@ fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: 
             }
             PaintWidgetEvent::Focus(true) => {
                 // this pane is now its tab's focus target (splits, menu actions)
-                let ts = app.tabs.borrow();
-                if let Some(tab) = ts.iter().find(|t| t.panes.iter().any(|p| p.id == id)) {
-                    tab.active_pane.set(id);
+                let pws: Vec<PaintWidget> = {
+                    let ts = app.tabs.borrow();
+                    ts.iter()
+                        .find(|t| t.panes.iter().any(|p| p.id == id))
+                        .map(|t| {
+                            t.active_pane.set(id);
+                            t.panes.iter().map(|p| p.pw).collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                };
+                // solid/hollow cursor swaps on focus change: repaint every pane
+                for pw in pws {
+                    pw.update();
                 }
             }
             PaintWidgetEvent::Focus(false) => {
@@ -1719,7 +2037,8 @@ fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: 
                     }
                     let still_active = {
                         let ts = app.tabs.borrow();
-                        ts.iter().enumerate()
+                        ts.iter()
+                            .enumerate()
                             .find(|(_, t)| t.panes.iter().any(|p| p.id == id))
                             .is_some_and(|(ti, t)| {
                                 ti == app.active.get() && t.active_pane.get() == id
@@ -1786,7 +2105,14 @@ fn make_pane(app: &App, container: &QWidget, id: u64, shared: Arc<Shared>, pid: 
 
     make_notifier(gui_read, app, &shared);
 
-    Pane { id, shared, pid, pw, sb, rect: pane_rect }
+    Pane {
+        id,
+        shared,
+        pid,
+        pw,
+        sb,
+        rect: pane_rect,
+    }
 }
 
 /// new tab: container widget + one pane; the tabbar's currentChanged handler
@@ -1843,7 +2169,8 @@ pub fn spawn_tab(app: &App, cwd: Option<String>) {
     // long titles elide instead of stretching the tab. Height unconstrained.
     const QWIDGETSIZE_MAX: i32 = (1 << 24) - 1;
     app.tabbar.set_tab_minimum_size(i, &QSize::new(110, 0));
-    app.tabbar.set_tab_maximum_size(i, &QSize::new(450, QWIDGETSIZE_MAX));
+    app.tabbar
+        .set_tab_maximum_size(i, &QSize::new(450, QWIDGETSIZE_MAX));
     app.tabbar.set_current_index(i); // fires currentChanged: shows + focuses
     app.tabbar.as_widget().flush_layout();
 }
@@ -1860,7 +2187,14 @@ fn divider_at(app: &App, x: i32, y: i32) -> Option<(u64, bool)> {
     let ts = app.tabs.borrow();
     let tab = &ts[app.active.get()];
     let mut divs = Vec::new();
-    dividers_of(&tab.tree, 0, 0, tab.container.width(), tab.container.height(), &mut divs);
+    dividers_of(
+        &tab.tree,
+        0,
+        0,
+        tab.container.width(),
+        tab.container.height(),
+        &mut divs,
+    );
     divs.iter()
         .find(|(_, _, _, band)| point_in(*band, x, y, HIT_SLACK))
         .map(|(id, vertical, _, _)| (*id, *vertical))
@@ -1933,7 +2267,9 @@ pub fn split_pane(app: &App, pane_id: u64, vertical: bool) -> Option<Arc<Shared>
     // phase 1: geometry + cwd under a short borrow; the new pane halves the old rect
     let (ti, cols, lines, cwd) = {
         let ts = app.tabs.borrow();
-        let ti = ts.iter().position(|t| t.panes.iter().any(|p| p.id == pane_id))?;
+        let ti = ts
+            .iter()
+            .position(|t| t.panes.iter().any(|p| p.id == pane_id))?;
         let tab = &ts[ti];
         let (cw, ch) = (tab.container.width(), tab.container.height());
         let (_, _, w, h) = rect_of(&tab.tree, pane_id, 0, 0, cw, ch)?;
@@ -1970,12 +2306,54 @@ pub fn split_pane(app: &App, pane_id: u64, vertical: bool) -> Option<Arc<Shared>
         );
         tab.panes.push(pane);
         tab.active_pane.set(new_id);
+        // deepin-terminal: N same-axis splits share the space equally (thirds, ...)
+        equalize_axis(&mut tab.tree, vertical);
         layout_tab(tab);
     }
     let pw = app.tabs.borrow()[ti].pane(new_id).pw;
     pw.as_widget().show();
     pw.set_focus();
     Some(shared)
+}
+
+/// focus the next/previous pane in leaf order (konsole Ctrl+Tab view cycling)
+pub fn cycle_pane(app: &App, step: i32) {
+    let pw = {
+        let ts = app.tabs.borrow();
+        let tab = &ts[app.active.get()];
+        let mut ids = Vec::new();
+        leaf_ids(&tab.tree, &mut ids);
+        if ids.len() < 2 {
+            return;
+        }
+        let cur = ids
+            .iter()
+            .position(|i| *i == tab.active_pane.get())
+            .unwrap_or(0);
+        let next = ids[(cur as i32 + step).rem_euclid(ids.len() as i32) as usize];
+        tab.pane(next).pw
+    };
+    // set_focus fires Focus events synchronously; they borrow tabs (reentrancy)
+    pw.set_focus();
+}
+
+/// focus the nearest pane in direction (dx, dy); no-op when none lies that way
+pub fn focus_pane_dir(app: &App, dx: i32, dy: i32) {
+    let pw = {
+        let ts = app.tabs.borrow();
+        let tab = &ts[app.active.get()];
+        let (w, h) = (tab.container.width(), tab.container.height());
+        let mut ids = Vec::new();
+        leaf_ids(&tab.tree, &mut ids);
+        let rects: Vec<_> = ids
+            .iter()
+            .filter_map(|id| rect_of(&tab.tree, *id, 0, 0, w, h).map(|r| (*id, r)))
+            .collect();
+        dir_target(&rects, tab.active_pane.get(), dx, dy).map(|id| tab.pane(id).pw)
+    };
+    if let Some(pw) = pw {
+        pw.set_focus();
+    }
 }
 
 pub fn switch_tab(app: &App, i: usize) {
@@ -2168,7 +2546,10 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
     win.set_central_widget(&root.as_widget());
     // remember window size (deepin-terminal window_width/height, konsole state rc)
     let st = config::State::load();
-    win.resize(st.window_width.unwrap_or(80 * cell_w), st.window_height.unwrap_or(24 * cell_h));
+    win.resize(
+        st.window_width.unwrap_or(80 * cell_w),
+        st.window_height.unwrap_or(24 * cell_h),
+    );
 
     let icon = QIcon::from_theme("deepin-terminal");
     win.set_window_icon(&icon);
@@ -2182,7 +2563,9 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
     // dde-file-manager "open in terminal here" sets our process cwd; portable-pty
     // defaults the shell to $HOME unless we pass it through explicitly
     let cwd = work_dir_arg().or_else(|| {
-        std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned())
+        std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
     });
     spawn_tab(&app, cwd);
     root.leak();
@@ -2203,12 +2586,21 @@ mod tests {
     use dtk::qt::{key, modifier};
 
     fn kev(k: i32, mods: i32, text: &str) -> KeyEvent {
-        KeyEvent { key: k, mods, text: text.into(), press: true, autorepeat: false }
+        KeyEvent {
+            key: k,
+            mods,
+            text: text.into(),
+            press: true,
+            autorepeat: false,
+        }
     }
 
     #[test]
     fn modifiers() {
-        assert_eq!(key_bytes(&kev(key::LEFT, 0, ""), false), Some(b"\x1b[D".to_vec()));
+        assert_eq!(
+            key_bytes(&kev(key::LEFT, 0, ""), false),
+            Some(b"\x1b[D".to_vec())
+        );
         assert_eq!(
             key_bytes(&kev(key::LEFT, modifier::ALT, ""), false),
             Some(b"\x1b[1;3D".to_vec())
@@ -2217,12 +2609,18 @@ mod tests {
             key_bytes(&kev(key::RIGHT, modifier::ALT | modifier::SHIFT, ""), false),
             Some(b"\x1b[1;4C".to_vec())
         );
-        assert_eq!(key_bytes(&kev(key::BACKSPACE, 0, ""), false), Some(b"\x7f".to_vec()));
+        assert_eq!(
+            key_bytes(&kev(key::BACKSPACE, 0, ""), false),
+            Some(b"\x7f".to_vec())
+        );
         assert_eq!(
             key_bytes(&kev(key::BACKSPACE, modifier::ALT, ""), false),
             Some(b"\x1b\x7f".to_vec())
         );
-        assert_eq!(key_bytes(&kev(i32::from(b'L'), modifier::CONTROL, "\x0c"), false), Some(vec![0x0c]));
+        assert_eq!(
+            key_bytes(&kev(i32::from(b'L'), modifier::CONTROL, "\x0c"), false),
+            Some(vec![0x0c])
+        );
         assert_eq!(
             key_bytes(&kev(i32::from(b'F'), modifier::ALT, "f"), false),
             Some(b"\x1bf".to_vec())
@@ -2232,9 +2630,18 @@ mod tests {
     #[test]
     fn app_cursor_keys() {
         // DECCKM on: plain arrows go SS3; modified arrows keep CSI
-        assert_eq!(key_bytes(&kev(key::UP, 0, ""), true), Some(b"\x1bOA".to_vec()));
-        assert_eq!(key_bytes(&kev(key::DOWN, 0, ""), true), Some(b"\x1bOB".to_vec()));
-        assert_eq!(key_bytes(&kev(key::UP, 0, ""), false), Some(b"\x1b[A".to_vec()));
+        assert_eq!(
+            key_bytes(&kev(key::UP, 0, ""), true),
+            Some(b"\x1bOA".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&kev(key::DOWN, 0, ""), true),
+            Some(b"\x1bOB".to_vec())
+        );
+        assert_eq!(
+            key_bytes(&kev(key::UP, 0, ""), false),
+            Some(b"\x1b[A".to_vec())
+        );
         assert_eq!(
             key_bytes(&kev(key::UP, modifier::SHIFT, ""), true),
             Some(b"\x1b[1;2A".to_vec())
@@ -2244,7 +2651,10 @@ mod tests {
     #[test]
     fn shift_tab_is_csi_z() {
         // xterm: Shift+Tab (Backtab) is always plain CSI Z, never mod-encoded
-        assert_eq!(key_bytes(&kev(key::BACKTAB, modifier::SHIFT, ""), false), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(
+            key_bytes(&kev(key::BACKTAB, modifier::SHIFT, ""), false),
+            Some(b"\x1b[Z".to_vec())
+        );
     }
 
     #[test]
@@ -2257,7 +2667,10 @@ mod tests {
         assert_eq!(find_url_span("no link at all", 3), None);
         assert_eq!(find_url_span("http://a.b", 0), Some((0, 10)));
         assert_eq!(find_url_span("(https://x.y)", 2), Some((1, 12))); // stops at ')'
-        assert_eq!(find_url_span("see http://x and https://y.z", 20), Some((17, 28)));
+        assert_eq!(
+            find_url_span("see http://x and https://y.z", 20),
+            Some((17, 28))
+        );
     }
 
     #[test]
@@ -2271,6 +2684,181 @@ mod tests {
     }
 
     #[test]
+    fn cursor_shapes() {
+        use config::CursorShape::*;
+        let solid = |shape| {
+            cursor_rects(
+                Cursor {
+                    shape,
+                    focused: true,
+                },
+                10,
+                20,
+            )
+        };
+        let hollow = |shape| {
+            cursor_rects(
+                Cursor {
+                    shape,
+                    focused: false,
+                },
+                10,
+                20,
+            )
+        };
+        assert_eq!(solid(Block), vec![(0, 0, 10, 20)]);
+        // beam: thin bar on the left edge; underline: thin bar at the bottom
+        assert_eq!(solid(Beam), vec![(0, 0, 2, 20)]);
+        assert_eq!(solid(Underline), vec![(0, 18, 10, 2)]);
+        // unfocused pane: hollow block outline, whatever the configured shape
+        for shape in [Block, Beam, Underline] {
+            assert_eq!(
+                hollow(shape),
+                vec![(0, 0, 10, 2), (0, 18, 10, 2), (0, 0, 2, 20), (8, 0, 2, 20)]
+            );
+        }
+    }
+
+    #[test]
+    fn pane_key_matching() {
+        let cfg = Config::default();
+        // konsole view cycling: Ctrl+Tab / Ctrl+Shift+Tab (Qt: Shift+Tab = Backtab)
+        assert_eq!(
+            match_action(&cfg, key::TAB, modifier::CONTROL),
+            Some(config::Action::NextPane)
+        );
+        assert_eq!(
+            match_action(&cfg, key::BACKTAB, modifier::CONTROL | modifier::SHIFT),
+            Some(config::Action::PrevPane)
+        );
+        // plain / shift-only tab stays with the shell (\t / CSI Z)
+        assert_eq!(match_action(&cfg, key::TAB, 0), None);
+        assert_eq!(match_action(&cfg, key::BACKTAB, modifier::SHIFT), None);
+    }
+
+    #[test]
+    fn equalize_shares() {
+        // two same-axis splits -> equal thirds (deepin-terminal)
+        let split = |vertical, a, b| Node::Split {
+            id: 0,
+            vertical,
+            ratio: Cell::new(0.5),
+            a: Box::new(a),
+            b: Box::new(b),
+        };
+        let mut t = Node::Leaf(1);
+        assert!(replace_leaf(
+            &mut t,
+            1,
+            split(true, Node::Leaf(1), Node::Leaf(2))
+        ));
+        equalize_axis(&mut t, true);
+        assert!(replace_leaf(
+            &mut t,
+            2,
+            split(true, Node::Leaf(2), Node::Leaf(3))
+        ));
+        equalize_axis(&mut t, true);
+        // 99px wide, DIV=2 per split: ~33px each
+        let w = |id| rect_of(&t, id, 0, 0, 99, 40).unwrap().2;
+        let (w1, w2, w3) = (w(1), w(2), w(3));
+        assert!(
+            (w1 - w2).abs() <= 1 && (w2 - w3).abs() <= 1,
+            "{w1} {w2} {w3} not thirds"
+        );
+        // closing the middle pane rebalances the rest to halves
+        let axis = parent_axis(&t, 2);
+        assert_eq!(axis, Some(true));
+        assert!(remove_leaf(&mut t, 2));
+        equalize_axis(&mut t, axis.unwrap());
+        assert_eq!(rect_of(&t, 1, 0, 0, 99, 40).unwrap().2, 48);
+        assert_eq!(rect_of(&t, 3, 0, 0, 99, 40).unwrap().2, 49);
+        // a mixed-axis subtree counts as one unit of the other axis
+        assert!(replace_leaf(
+            &mut t,
+            3,
+            split(false, Node::Leaf(3), Node::Leaf(4))
+        ));
+        equalize_axis(&mut t, false);
+        let h = |id| rect_of(&t, id, 0, 0, 99, 40).unwrap().3;
+        assert!((h(3) - h(4)).abs() <= 1, "{} {} not halves", h(3), h(4));
+    }
+
+    #[test]
+    fn close_focus_fallback() {
+        // A | (B over C): closing C falls back to its split sibling B
+        // (deepin-terminal WidgetTreeReverseFindTerm), not top-left A
+        let split = |vertical, a, b| Node::Split {
+            id: 0,
+            vertical,
+            ratio: Cell::new(0.5),
+            a: Box::new(a),
+            b: Box::new(b),
+        };
+        let t = split(
+            true,
+            Node::Leaf(1),
+            split(false, Node::Leaf(2), Node::Leaf(3)),
+        );
+        assert_eq!(focus_fallback(&t, 3), Some(2));
+        assert_eq!(focus_fallback(&t, 2), Some(3));
+        assert_eq!(focus_fallback(&t, 1), Some(2)); // sibling subtree's first leaf
+        assert_eq!(focus_fallback(&t, 99), None);
+    }
+
+    #[test]
+    fn directional_focus() {
+        // A | B over C
+        let rects = vec![
+            (1u64, (0, 0, 50, 40)),
+            (2u64, (50, 0, 50, 20)),
+            (3u64, (50, 20, 50, 20)),
+        ];
+        assert_eq!(dir_target(&rects, 1, 1, 0), Some(2)); // right: B/C tie, first wins
+        assert_eq!(dir_target(&rects, 1, -1, 0), None); // nothing left of A
+        assert_eq!(dir_target(&rects, 2, 0, 1), Some(3));
+        assert_eq!(dir_target(&rects, 3, 0, -1), Some(2));
+        assert_eq!(dir_target(&rects, 3, -1, 0), Some(1));
+        assert_eq!(dir_target(&rects, 2, 1, 0), None);
+    }
+
+    #[test]
+    fn mixed_axis_equalize_keeps_strip_shares() {
+        // h-split, v-split on the bottom, h-split on the bottom-right: the top
+        // pane must keep its half — a vertical subtree is one slot in the
+        // horizontal strip, not zero (a zero slot made the top pane take the
+        // whole window)
+        let split = |vertical, a, b| Node::Split {
+            id: 0,
+            vertical,
+            ratio: Cell::new(0.5),
+            a: Box::new(a),
+            b: Box::new(b),
+        };
+        let mut t = Node::Leaf(1);
+        assert!(replace_leaf(&mut t, 1, split(false, Node::Leaf(1), Node::Leaf(2))));
+        equalize_axis(&mut t, false);
+        assert!(replace_leaf(&mut t, 2, split(true, Node::Leaf(2), Node::Leaf(3))));
+        equalize_axis(&mut t, true);
+        assert!(replace_leaf(&mut t, 3, split(false, Node::Leaf(3), Node::Leaf(4))));
+        equalize_axis(&mut t, false);
+        // 99x80, DIV=2: top pane keeps half the height; the bottom-right
+        // column splits horizontally into halves
+        let r = |t: &Node, id: u64| rect_of(t, id, 0, 0, 99, 80).unwrap();
+        assert_eq!(r(&t, 1).3, 39, "top pane must keep half the window");
+        assert_eq!(r(&t, 2).3, 39, "bottom-left column keeps the other half");
+        assert!((r(&t, 3).3 - r(&t, 4).3).abs() <= 1, "bottom-right splits horizontally");
+        // the same strip re-equalizes when the top pane is split again:
+        // three horizontal slots, each about a third of the height
+        assert!(replace_leaf(&mut t, 1, split(false, Node::Leaf(1), Node::Leaf(5))));
+        equalize_axis(&mut t, false);
+        for id in [1, 5, 2] {
+            let h = r(&t, id).3;
+            assert!((h - 26).abs() <= 1, "pane {id} height {h} not a third");
+        }
+    }
+
+    #[test]
     fn split_tree_surgery() {
         // replace + remove keep the tree balanced
         let split = |vertical, a, b| Node::Split {
@@ -2281,8 +2869,16 @@ mod tests {
             b: Box::new(b),
         };
         let mut t = Node::Leaf(1);
-        assert!(replace_leaf(&mut t, 1, split(true, Node::Leaf(1), Node::Leaf(2))));
-        assert!(replace_leaf(&mut t, 2, split(false, Node::Leaf(2), Node::Leaf(3))));
+        assert!(replace_leaf(
+            &mut t,
+            1,
+            split(true, Node::Leaf(1), Node::Leaf(2))
+        ));
+        assert!(replace_leaf(
+            &mut t,
+            2,
+            split(false, Node::Leaf(2), Node::Leaf(3))
+        ));
         assert!(!replace_leaf(&mut t, 99, Node::Empty));
         // layout math: 100x40, DIV=2 gap; left/right 49px each, then the right
         // half top/bottom 19px each
@@ -2305,4 +2901,3 @@ mod tests {
         assert!(!remove_leaf(&mut t, 2)); // root leaf: caller's business
     }
 }
-

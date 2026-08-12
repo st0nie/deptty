@@ -56,15 +56,22 @@ font_family = "Fira Code"
 font_size = 13
 scrollback = 20000
 shell = "/bin/zsh"
+cursor_shape = "block"  # block | beam | underline (focused pane; unfocused
+                        # panes always show a hollow block, deepin-terminal style)
 
 [[key_bindings]]
 key = "T"            # single char or qt key name: "Left", "F5", "Escape", ...
 mods = "Ctrl+Shift"  # "+"-joined: Ctrl, Shift, Alt
 action = "new_tab"   # copy | paste | new_tab | close_tab | next_tab | prev_tab
+                     # split_horizontal | split_vertical | next_pane | prev_pane
+                     # focus_pane_up | focus_pane_down | focus_pane_left | focus_pane_right
 ```
 
 Defaults: Ctrl+Shift+C/V copy/paste, Ctrl+Shift+T new tab, Ctrl+Shift+W close
-tab, Ctrl+Shift+Left/Right switch tab.
+tab, Ctrl+Shift+Left/Right switch tab, Ctrl+Shift+( / Ctrl+Shift+) split
+left-right / top-bottom, Ctrl+Tab / Ctrl+Shift+Tab cycle split panes (konsole).
+Same-axis splits share space equally (two splits = thirds); closing a pane
+focuses its split sibling and rebalances the rest.
 
 ## Layout
 

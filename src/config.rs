@@ -15,6 +15,18 @@ pub struct Config {
     pub font_family: Option<String>,
     /// alacritty-style key bindings: [[key_binding]] key="T" mods="Ctrl+Shift" action="new_tab"
     pub key_bindings: Vec<KeyBinding>,
+    /// text cursor shape for the focused pane; unfocused panes always draw a
+    /// hollow block (deepin-terminal focus hint)
+    pub cursor_shape: CursorShape,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorShape {
+    #[default]
+    Block,
+    Beam,
+    Underline,
 }
 
 impl Default for Config {
@@ -25,6 +37,7 @@ impl Default for Config {
             shell: None,
             font_family: None,
             key_bindings: default_key_bindings(),
+            cursor_shape: CursorShape::default(),
         }
     }
 }
@@ -42,6 +55,14 @@ pub enum Action {
     SplitHorizontal,
     /// vertical divider, panes left/right (konsole Split View Left/Right)
     SplitVertical,
+    /// cycle pane focus in leaf order (konsole Ctrl+Tab / Ctrl+Shift+Tab)
+    NextPane,
+    PrevPane,
+    /// directional pane focus (deepin-terminal select_*_workspace, Alt+arrows)
+    FocusPaneUp,
+    FocusPaneDown,
+    FocusPaneLeft,
+    FocusPaneRight,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -69,6 +90,11 @@ fn default_key_bindings() -> Vec<KeyBinding> {
         // konsole split defaults: Ctrl+Shift+( left/right, Ctrl+Shift+) top/bottom
         kb("(", "Ctrl+Shift", Action::SplitVertical),
         kb(")", "Ctrl+Shift", Action::SplitHorizontal),
+        // konsole view cycling: Ctrl+Tab next pane, Ctrl+Shift+Tab previous
+        // (Qt delivers Shift+Tab as Key_Backtab). No directional defaults:
+        // konsole has none, and deepin's Alt+arrows collide with shell apps
+        kb("Tab", "Ctrl", Action::NextPane),
+        kb("Backtab", "Ctrl+Shift", Action::PrevPane),
     ]
 }
 
@@ -91,9 +117,10 @@ impl KeyBinding {
         use dtk::qt::key;
         let s = self.key.as_str();
         if let Some(c) = s.chars().next()
-            && s.chars().count() == 1 {
-                return Some(c.to_ascii_uppercase() as i32);
-            }
+            && s.chars().count() == 1
+        {
+            return Some(c.to_ascii_uppercase() as i32);
+        }
         Some(match s.to_ascii_lowercase().as_str() {
             "escape" | "esc" => key::ESCAPE,
             "tab" => key::TAB,
@@ -112,6 +139,36 @@ impl KeyBinding {
             "pagedown" => key::PAGE_DOWN,
             _ => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_shape_defaults_to_block() {
+        let cfg: Config = toml::from_str("").expect("empty config parses");
+        assert_eq!(cfg.cursor_shape, CursorShape::Block);
+        let cfg: Config = toml::from_str("cursor_shape = \"beam\"").expect("beam parses");
+        assert_eq!(cfg.cursor_shape, CursorShape::Beam);
+        let cfg: Config = toml::from_str("cursor_shape = \"underline\"").expect("underline parses");
+        assert_eq!(cfg.cursor_shape, CursorShape::Underline);
+    }
+
+    #[test]
+    fn pane_navigation_bindings_present() {
+        let cfg = Config::default();
+        let has = |key: &str, mods: &str, action: Action| {
+            cfg.key_bindings
+                .iter()
+                .any(|b| b.key == key && b.mods == mods && b.action == action)
+        };
+        assert!(has("Tab", "Ctrl", Action::NextPane));
+        assert!(has("Backtab", "Ctrl+Shift", Action::PrevPane));
+        // directional focus has no default binding (alt+arrows break shell apps)
+        // but stays user-configurable
+        assert!(cfg.key_bindings.iter().all(|b| b.mods != "Alt"));
     }
 }
 
