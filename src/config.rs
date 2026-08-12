@@ -38,6 +38,10 @@ pub enum Action {
     CloseTab,
     NextTab,
     PrevTab,
+    /// horizontal divider, panes top/bottom (konsole Split View Top/Bottom)
+    SplitHorizontal,
+    /// vertical divider, panes left/right (konsole Split View Left/Right)
+    SplitVertical,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -62,6 +66,9 @@ fn default_key_bindings() -> Vec<KeyBinding> {
         kb("W", "Ctrl+Shift", Action::CloseTab),
         kb("Right", "Ctrl+Shift", Action::NextTab),
         kb("Left", "Ctrl+Shift", Action::PrevTab),
+        // konsole split defaults: Ctrl+Shift+( left/right, Ctrl+Shift+) top/bottom
+        kb("(", "Ctrl+Shift", Action::SplitVertical),
+        kb(")", "Ctrl+Shift", Action::SplitHorizontal),
     ]
 }
 
@@ -83,11 +90,10 @@ impl KeyBinding {
     pub fn key_code(&self) -> Option<i32> {
         use dtk::qt::key;
         let s = self.key.as_str();
-        if let Some(c) = s.chars().next() {
-            if s.chars().count() == 1 {
+        if let Some(c) = s.chars().next()
+            && s.chars().count() == 1 {
                 return Some(c.to_ascii_uppercase() as i32);
             }
-        }
         Some(match s.to_ascii_lowercase().as_str() {
             "escape" | "esc" => key::ESCAPE,
             "tab" => key::TAB,

@@ -1,0 +1,8 @@
+menu:
+  copy: Copy
+  paste: Paste
+  open_in_file_manager: Open in File Manager
+  split_horizontal: Split Horizontally
+  split_vertical: Split Vertically
+  new_tab: New Tab
+  close_workspace: Close Workspace

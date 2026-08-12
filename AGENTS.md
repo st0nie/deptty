@@ -7,27 +7,33 @@ deepin-terminal. Upstream bindings live in [dtk-rs](https://github.com/st0nie/dt
 ## Layout
 
 ```
-src/main.rs    the whole app (~1500 lines): window, tabs, render loop, input,
-               PTY reader threads, smoke mode
+src/main.rs    thin entry point: main() -> deptty::main_run()
+src/lib.rs     the whole app: window, tabs, split-pane tree, render loop, input,
+               PTY reader threads, right-click menu
 src/config.rs  Config + KeyBinding + Action, TOML loading, defaults
+locales/       rust-i18n YAML (en, zh-CN); menu strings via t!("menu.*")
+tests/app.rs   headless full-session test (offscreen): shells, splits, tab move
 Cargo.toml     dtk (git), alacritty_terminal, portable-pty, serde/toml, dirs
 examples/      scratch probes (font metrics etc.), not part of the app
 ARCHITECTURE.md  design: component mapping, threading/tab model, render/input pipeline
 ```
 
-Deliberately one big main.rs for now; split into modules only when a second
-widget (splits/search bar) forces it.
+Deliberately one big lib.rs for now; split into modules only when a second
+widget (search bar) forces it.
 
 ## Commands
 
 ```sh
 cargo build                                        # build
 ./target/debug/deptty                              # run
-QT_QPA_PLATFORM=offscreen ./target/debug/deptty --smoke   # headless smoke test
+cargo test                                         # unit + headless integration (offscreen)
 ```
 
-No test suite; `--smoke` (spawns a real shell, asserts `DTKTERM_SMOKE_OK`
-appears in the grid) is the check. Run it after touching render/input/pty code.
+The integration test (`tests/app.rs`) boots the real app offscreen, spawns real
+shells, asserts grid content, splits, tab reorder, and the exit path. Run it
+after touching render/input/pty/pane code. Never hold a `tabs` borrow across
+widget calls that fire events synchronously (set_focus/show/resize) — the event
+handlers borrow `tabs` too and a borrow_mut will panic (reentrancy).
 
 ## Hard rules
 

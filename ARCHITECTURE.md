@@ -95,7 +95,7 @@ crash. See README for the key list; `src/config.rs` is the source of truth.
 
 Widget classes are all bound in dtk-rs; what's missing is application code:
 
-1. splits (DSplitter)
+1. ~~splits~~ done (binary Node tree per tab, ratio-draggable dividers; no DSplitter)
 2. search bar
 3. themes / opacity
 4. quake mode (zbus + KWin)
