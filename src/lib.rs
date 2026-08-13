@@ -280,9 +280,14 @@ fn color_q(c: Color, sc: &Scheme) -> QColor {
     QColor::rgb(i32::from(r), i32::from(g), i32::from(b))
 }
 
-fn should_paint_cell_bg(is_cursor: bool, cursor_hidden: bool, selected: bool, bg: Color) -> bool {
+fn should_paint_cell_bg(
+    is_cursor: bool,
+    cursor_shape_hidden: bool,
+    selected: bool,
+    bg: Color,
+) -> bool {
     (selected || !matches!(bg, Color::Named(NamedColor::Background)))
-        && (!is_cursor || cursor_hidden)
+        && (!is_cursor || cursor_shape_hidden)
 }
 
 // ---- keyboard -> PTY bytes ----
@@ -857,10 +862,10 @@ fn render(
         let is_cursor = offset == 0
             && i64::from(cursor.line.0) == line
             && (cur_col == col || (wide && cur_col == col + 1));
-        let cursor_hidden = is_cursor && cur.shape == CursorShape::Hidden;
+        let cursor_shape_hidden = cur.shape == CursorShape::Hidden;
         let st = RunStyle::of(cell, fg);
         let selected = sel.is_some_and(|r| r.contains(cs.point));
-        if should_paint_cell_bg(is_cursor, cursor_hidden, selected, bg) {
+        if should_paint_cell_bg(is_cursor, cursor_shape_hidden, selected, bg) {
             let (o_r, o_g, o_b) = if sc.dark { (255, 255, 255) } else { (0, 0, 0) };
             let q = if selected {
                 QColor::rgba(o_r, o_g, o_b, 60)
@@ -875,7 +880,7 @@ fn render(
                 &q,
             );
         }
-        if is_cursor && !cursor_hidden {
+        if is_cursor && !cursor_shape_hidden {
             let q = QColor::rgba(
                 i32::from(sc.cursor.0),
                 i32::from(sc.cursor.1),
