@@ -338,7 +338,10 @@ fn headless_full_session() {
                                 match stage {
                                     0 => {
                                         // s1's title reached the tab while p1 was focused
-                                        assert_eq!(label, "P1_TITLE", "active pane title not applied");
+                                        assert_eq!(
+                                            label, "P1_TITLE",
+                                            "active pane title not applied"
+                                        );
                                         deptty::focus_pane_dir(&app, 1, 0); // p1 -> p2
                                     }
                                     1 => {
