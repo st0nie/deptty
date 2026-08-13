@@ -1,0 +1,29 @@
+# deptty colorscheme — Gruvbox Dark
+# Source: morhetz's gruvbox (dark, medium contrast)
+#   https://github.com/morhetz/gruvbox
+# Values from the author's own vim colorscheme terminal mapping
+#   https://github.com/morhetz/gruvbox/blob/master/colors/gruvbox.vim
+# (g:terminal_color_*; bg0 = dark0, fg = light1, bright colors as shipped)
+
+background = "#282828"  # dark0 / bg0
+foreground = "#ebdbb2"  # light1 / fg1
+cursor-color = "#ebdbb2"  # light1
+
+palette = [
+  "#282828", #  0 bg0 (dark0)
+  "#cc241d", #  1 neutral red
+  "#98971a", #  2 neutral green
+  "#d79921", #  3 neutral yellow
+  "#458588", #  4 neutral blue
+  "#b16286", #  5 neutral purple
+  "#689d6a", #  6 neutral aqua
+  "#a89984", #  7 fg4 (light4)
+  "#928374", #  8 gray
+  "#fb4934", #  9 bright red
+  "#b8bb26", # 10 bright green
+  "#fabd2f", # 11 bright yellow
+  "#83a598", # 12 bright blue
+  "#d3869b", # 13 bright purple
+  "#8ec07c", # 14 bright aqua
+  "#ebdbb2", # 15 fg1 (light1)
+]

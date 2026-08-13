@@ -88,6 +88,12 @@ up in order:
 2. `/usr/share/deptty/themes/<name>.toml` (system, installed by the .deb)
 3. `breeze` is embedded as a last resort, so it always works
 
+Shipped themes (all ported from their official upstream sources, credited in
+file headers): `breeze` (KDE Konsole), `solarized-dark`, `solarized-light`
+(Ethan Schoonover), `dracula` (draculatheme.com), `nord` (Nord / Arctic Ice
+Studio), `gruvbox-dark` (morhetz), `one-dark` (atom/one-dark-syntax),
+`tokyo-night` (folke/tokyonight.nvim).
+
 `theme` can also be a direct path to a `.toml`. The repo ships
 [`themes/breeze.toml`](themes/breeze.toml); copy it to your themes dir and
 edit, or drop in a ghostty theme file (extra keys are ignored):

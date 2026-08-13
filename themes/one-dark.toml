@@ -1,0 +1,28 @@
+# deptty colorscheme — One Dark
+# Source: atom's one-dark-syntax
+#   https://github.com/atom/one-dark-syntax/blob/master/styles/colors.less
+# Values are the HSL constants from colors.less converted to hex (the
+# standard ANSI mapping used by terminal ports of One Dark).
+
+background = "#282c34"  # @syntax-bg: hsl(220, 13%, 18%)
+foreground = "#abb2bf"  # @mono-1: hsl(220, 14%, 71%)
+cursor-color = "#abb2bf"  # @mono-1
+
+palette = [
+  "#282c34", #  0 background
+  "#e06c75", #  1 red (@hue-5:  hsl(355, 65%, 65%))
+  "#98c379", #  2 green (@hue-4: hsl(95, 38%, 62%))
+  "#e5c07b", #  3 yellow (@hue-6-2: hsl(39, 67%, 69%))
+  "#61afef", #  4 blue (@hue-2:  hsl(207, 82%, 66%))
+  "#c678dd", #  5 magenta (@hue-3: hsl(286, 60%, 67%))
+  "#56b6c2", #  6 cyan (@hue-1:  hsl(187, 47%, 55%))
+  "#abb2bf", #  7 foreground (@mono-1)
+  "#5c6370", #  8 bright black (@mono-3: hsl(220, 10%, 40%))
+  "#be5046", #  9 bright red (@hue-5-2: hsl(5, 48%, 51%))
+  "#98c379", # 10 bright green
+  "#d19a66", # 11 bright yellow (@hue-6: hsl(29, 54%, 61%))
+  "#61afef", # 12 bright blue
+  "#c678dd", # 13 bright magenta
+  "#56b6c2", # 14 bright cyan
+  "#ffffff", # 15 bright white
+]

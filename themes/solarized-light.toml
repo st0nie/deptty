@@ -1,0 +1,29 @@
+# deptty colorscheme — Solarized Light
+# Source: Ethan Schoonover's Solarized, official palette table
+#   https://ethanschoonover.com/solarized/
+# ANSI mapping: the author's own xresources port
+#   https://github.com/altercation/solarized/blob/master/xresources/solarized
+# Light mode inverts the base monotones: bg base3, fg base00.
+
+background = "#fdf6e3"  # base3
+foreground = "#657b83"  # base00
+cursor-color = "#93a1a1"  # base1 (xresources *cursorColor)
+
+palette = [
+  "#073642", #  0 base02
+  "#dc322f", #  1 red
+  "#859900", #  2 green
+  "#b58900", #  3 yellow
+  "#268bd2", #  4 blue
+  "#d33682", #  5 magenta
+  "#2aa198", #  6 cyan
+  "#eee8d5", #  7 base2
+  "#002b36", #  8 base03
+  "#cb4b16", #  9 orange
+  "#586e75", # 10 base01
+  "#657b83", # 11 base00
+  "#839496", # 12 base0
+  "#6c71c4", # 13 violet
+  "#93a1a1", # 14 base1
+  "#fdf6e3", # 15 base3
+]

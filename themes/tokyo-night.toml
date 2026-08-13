@@ -1,0 +1,26 @@
+# deptty colorscheme — Tokyo Night
+# Source: folke's tokyonight.nvim, official Alacritty port
+#   https://github.com/folke/tokyonight.nvim/blob/main/extras/alacritty/tokyonight_night.toml
+
+background = "#1a1b26"
+foreground = "#c0caf5"
+cursor-color = "#c0caf5"
+
+palette = [
+  "#15161e", #  0 black
+  "#f7768e", #  1 red
+  "#9ece6a", #  2 green
+  "#e0af68", #  3 yellow
+  "#7aa2f7", #  4 blue
+  "#bb9af7", #  5 magenta
+  "#7dcfff", #  6 cyan
+  "#a9b1d6", #  7 white
+  "#414868", #  8 bright black
+  "#ff899d", #  9 bright red
+  "#9fe044", # 10 bright green
+  "#faba4a", # 11 bright yellow
+  "#8db0ff", # 12 bright blue
+  "#c7a9ff", # 13 bright magenta
+  "#a4daff", # 14 bright cyan
+  "#c0caf5", # 15 bright white
+]

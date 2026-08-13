@@ -385,6 +385,29 @@ mod tests {
     }
 
     #[test]
+    fn shipped_themes_all_parse() {
+        // every theme bundled for the .deb must load by name and carry a
+        // full 16-entry palette (cargo test runs from the crate root)
+        let dir = std::path::Path::new("themes");
+        let user = std::env::temp_dir().join(format!("deptty-ship-{}", std::process::id()));
+        let system = dir.to_path_buf(); // the repo themes/ dir stands in for /usr/share
+        let mut found = 0;
+        for entry in std::fs::read_dir(dir).expect("themes dir") {
+            let p = entry.unwrap().path();
+            if p.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            let name = p.file_stem().unwrap().to_string_lossy().into_owned();
+            let t = Theme::load_from(&name, &user, &system).expect("theme loads");
+            assert!(t.bg().is_some(), "{name}: missing background");
+            assert!(t.fg().is_some(), "{name}: missing foreground");
+            assert!(t.palette16().is_some(), "{name}: palette must have 16 valid hex");
+            found += 1;
+        }
+        assert!(found >= 8, "expected at least 8 shipped themes, got {found}");
+    }
+
+    #[test]
     fn pane_navigation_bindings_present() {
         let cfg = Config::default();
         let has = |key: &str, mods: &str, action: Action| {

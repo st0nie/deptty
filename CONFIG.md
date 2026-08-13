@@ -233,6 +233,24 @@ Colorschemes are ghostty-style TOML files. A theme is selected with the
 A missing or unparseable theme file is not an error: deptty prints a warning
 and falls back to the default palette.
 
+### Shipped themes
+
+The repo (and the `.deb`) ship these, all ported from their official
+upstream sources (each file's header names the exact source):
+
+| name | source |
+|---|---|
+| `breeze` | KDE Konsole `Breeze.colorscheme` |
+| `solarized-dark` / `solarized-light` | Ethan Schoonover's Solarized + author's xresources port |
+| `dracula` | Dracula spec, official Alacritty port |
+| `nord` | Nord palette, official Xresources port |
+| `gruvbox-dark` | morhetz/gruvbox `gruvbox.vim` |
+| `one-dark` | atom/one-dark-syntax `colors.less` |
+| `tokyo-night` | folke/tokyonight.nvim Alacritty port |
+
+Pick one with `theme = "nord"`, or copy any file to your themes dir and
+edit it — your copy wins over the shipped one.
+
 ### Theme file format
 
 Theme files use the same field conventions as [ghostty
