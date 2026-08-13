@@ -1,0 +1,26 @@
+# deptty colorscheme — Breeze (ported from KDE Konsole's Breeze terminal scheme)
+# ghostty field conventions: kebab-case keys, #rrggbb hex.
+# palette = the 16 ANSI colors (normal then bright).
+
+background = "#232627"
+foreground = "#fcfcfc"
+cursor-color = "#eff0f1"
+
+palette = [
+  "#232627", # black
+  "#ed1515", # red
+  "#11d116", # green
+  "#f67400", # yellow
+  "#1d99f3", # blue
+  "#9b59b6", # magenta
+  "#1abc9c", # cyan
+  "#fcfcfc", # white
+  "#7f8c8d", # bright black
+  "#c0392b", # bright red
+  "#1cdc9a", # bright green
+  "#fdbc4b", # bright yellow
+  "#3daee9", # bright blue
+  "#8e44ad", # bright magenta
+  "#16a085", # bright cyan
+  "#ffffff", # bright white
+]

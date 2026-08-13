@@ -17,7 +17,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::{self, Term};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, StdSyncHandler};
-use config::Config;
+use config::{Config, Theme};
 use dtk::widgets::DTabBar;
 use dtk::*;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -94,15 +94,20 @@ impl Shared {
 
 // ---- colors: xterm palette ----
 
-/// palette lifted from deepin-terminal's default Dark / Light colorschemes
-struct Scheme {
-    dark: bool,
-    fg: (u8, u8, u8),
-    bg: (u8, u8, u8),
-    colors: [(u8, u8, u8); 16],
+/// colorscheme: default deepin dark/light palette, or a resolved theme file
+#[derive(Debug, Clone, Copy)]
+pub struct Scheme {
+    pub dark: bool,
+    pub fg: (u8, u8, u8),
+    pub bg: (u8, u8, u8),
+    /// cursor overlay base (theme `cursor-color`, else white/black by dark)
+    pub cursor: (u8, u8, u8),
+    pub colors: [(u8, u8, u8); 16],
 }
 
-fn scheme() -> Scheme {
+/// default scheme: deepin-terminal's Dark / Light palettes, auto-picked from
+/// the system window color (matches the old `scheme()` behavior)
+fn default_scheme() -> Scheme {
     let (r, g, b) = DApplication::palette_window_rgb();
     let light = (u32::from(r) * 299 + u32::from(g) * 587 + u32::from(b) * 114) / 1000 >= 128;
     if light {
@@ -110,6 +115,7 @@ fn scheme() -> Scheme {
             dark: false,
             fg: (0, 0, 0),
             bg: (248, 248, 248),
+            cursor: (0, 0, 0),
             colors: [
                 (0, 0, 0),       // black
                 (178, 24, 24),   // red
@@ -134,6 +140,7 @@ fn scheme() -> Scheme {
             dark: true,
             fg: (0, 205, 0), // deepin's signature green-on-dark
             bg: (37, 37, 37),
+            cursor: (255, 255, 255),
             colors: [
                 (0, 0, 0),
                 (178, 24, 24),
@@ -154,6 +161,27 @@ fn scheme() -> Scheme {
             ],
         }
     }
+}
+
+/// resolve a configured theme into a Scheme; `None` (no theme key or a
+/// missing/unparseable theme file) falls back to the default palette
+pub fn scheme_for(theme: Option<&Theme>) -> Scheme {
+    let Some(t) = theme else { return default_scheme() };
+    let mut sc = default_scheme();
+    if let Some(bg) = t.bg() {
+        sc.bg = bg;
+        sc.dark = (u32::from(bg.0) * 299 + u32::from(bg.1) * 587 + u32::from(bg.2) * 114) / 1000 < 128;
+    }
+    if let Some(fg) = t.fg() {
+        sc.fg = fg;
+    }
+    sc.cursor = t
+        .cursor()
+        .unwrap_or(if sc.dark { (255, 255, 255) } else { (0, 0, 0) });
+    if let Some(p) = t.palette16() {
+        sc.colors = p;
+    }
+    sc
 }
 
 fn named_rgb(c: NamedColor, sc: &Scheme) -> (u8, u8, u8) {
@@ -766,8 +794,8 @@ fn render(
     h: i32,
     y_off: i32,
     cur: Cursor,
+    sc: &Scheme,
 ) {
-    let sc = scheme();
     p.set_font(&fonts.normal);
     // paint the whole viewport: default-bg cells must match the scheme, not the widget bg
     p.fill_rect(
@@ -804,8 +832,12 @@ fn render(
             && (cur_col == col || (wide && cur_col == col + 1));
         let selected = sel.is_some_and(|r| r.contains(cs.point));
         if is_cursor {
-            let (o_r, o_g, o_b) = if sc.dark { (255, 255, 255) } else { (0, 0, 0) };
-            let q = QColor::rgba(o_r, o_g, o_b, 110);
+            let q = QColor::rgba(
+                i32::from(sc.cursor.0),
+                i32::from(sc.cursor.1),
+                i32::from(sc.cursor.2),
+                110,
+            );
             let (cx, cy) = (col as i32 * g.cell_w, y_off + line as i32 * g.cell_h);
             for (rx, ry, rw, rh) in cursor_rects(cur, span * g.cell_w, g.cell_h) {
                 p.fill_rect(cx + rx, cy + ry, rw, rh, &q);
@@ -1277,6 +1309,7 @@ pub struct App {
     pub root: PaintWidget,
     pub geom: Rc<GridGeom>,
     pub win: DMainWindow,
+    pub scheme: Scheme,
 }
 
 fn cwd_of_pid(pid: u32) -> Option<String> {
@@ -1716,7 +1749,7 @@ fn make_pane(
                     shape: app.cfg.cursor_shape,
                     focused,
                 };
-                render(&snap, &p, &geom, &fonts, w, h, 0, cur);
+                render(&snap, &p, &geom, &fonts, w, h, 0, cur, &app.scheme);
                 // hovered link underline: span recomputed from this frame's
                 // snapshot (mouse-over, deepin-terminal style)
                 if let Some((line, col)) = hover.get() {
@@ -1738,7 +1771,7 @@ fn make_pane(
                     let text: String = chars.iter().collect();
                     if let Some((s, e)) = find_url_span(&text, col) {
                         let lw = (geom.cell_h / 12).max(1);
-                        let c = color_q(Color::Named(NamedColor::Foreground), &scheme());
+                        let c = color_q(Color::Named(NamedColor::Foreground), &app.scheme);
                         p.fill_rect(
                             s as i32 * geom.cell_w,
                             line * geom.cell_h + geom.ascent + 1,
@@ -2400,6 +2433,14 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
     let active = Rc::new(Cell::new(0usize));
     let tabbar = DTabBar::new();
 
+    // resolve the configured colorscheme once (theme file lookup, embedded
+    // breeze fallback); missing/unknown themes fall back to the default palette
+    let theme = cfg.theme.as_deref().and_then(Theme::load);
+    if cfg.theme.is_some() && theme.is_none() {
+        eprintln!("deptty: theme '{}' not found, using default", cfg.theme.as_deref().unwrap());
+    }
+    let scheme = scheme_for(theme.as_ref());
+
     let app = App {
         cfg: cfg.clone(),
         tabs,
@@ -2408,6 +2449,7 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
         root: PaintWidget::new(None, |_| {}), // placeholder, replaced below
         geom,
         win,
+        scheme,
     };
 
     // root widget: covers the window; its Resize drives every tab's layout.

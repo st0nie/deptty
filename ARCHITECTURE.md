@@ -54,9 +54,11 @@ GUI-thread only, no `Send` needed.
 
 `render()` iterates the visible grid, groups consecutive cells with the same
 style into runs, and draws one background rect + one `draw_text_at` per run.
-Color resolution: `cell_colors` -> `rgb_of` against a fixed `Scheme`
-(named 16-color palette + indexed 256 cube + RGB). Bold/underline/italic map
-to `QFont` variants; cursor is an inverted rect.
+Color resolution: `cell_colors` -> `rgb_of` against the resolved `Scheme`
+(named 16-color palette + indexed 256 cube + RGB) — the default deepin
+dark/light palette, or the palette of a `theme = "..."` colorscheme, see
+[Themes](#themes). Bold/underline/italic map to `QFont` variants; cursor is
+an inverted rect.
 
 Geometry: `QFont::metrics()` gives cell width/height/ascent (`GridGeom`);
 widget pixel size / cell size = grid cols/lines, fed to alacritty's
@@ -91,13 +93,30 @@ TOML at `$XDG_CONFIG_HOME/deptty/config.toml` (falls back to
 `~/.config/deptty/config.toml`). Bad file = warning + defaults, never a
 crash. See README for the key list; `src/config.rs` is the source of truth.
 
+## Themes
+
+Colorschemes are ghostty-style TOML files resolved once at boot
+(`scheme_for` in `src/lib.rs`, loading in `src/config.rs`):
+
+1. `~/.config/deptty/themes/<name>.toml` (user, wins)
+2. `/usr/share/deptty/themes/<name>.toml` (system; the .deb installs
+   `themes/breeze.toml` there)
+3. embedded `breeze` default (dev builds, before install)
+
+`theme` in config.toml takes a name or a direct file path; missing/unknown
+themes and bad TOML warn and fall back to the default palette — never crash.
+Theme files use ghostty field conventions (`background`, `foreground`,
+`cursor-color`, `palette` = 16 ANSI colors, array or `N = "#..."` table
+form); extra ghostty keys are ignored. Selection is always the translucent
+overlay, so `selection-*` / `cursor-text` keys parse but are unused.
+
 ## Roadmap (deepin-terminal parity)
 
 Widget classes are all bound in dtk-rs; what's missing is application code:
 
 1. ~~splits~~ done (binary Node tree per tab, ratio-draggable dividers; no DSplitter)
 2. search bar
-3. themes / opacity
+3. ~~themes~~ done (ghostty-style TOML colorschemes, see Themes); opacity still planned
 4. quake mode (zbus + KWin)
 5. single instance (zbus)
 6. remote management / SSH (oo7 secret storage, encoding detection)

@@ -18,6 +18,9 @@ pub struct Config {
     /// text cursor shape for the focused pane; unfocused panes always draw a
     /// hollow block (deepin-terminal focus hint)
     pub cursor_shape: CursorShape,
+    /// colorscheme name ("breeze", ...) or path to a theme .toml; None ->
+    /// default deepin palette (auto dark/light from the system window color)
+    pub theme: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -38,7 +41,150 @@ impl Default for Config {
             font_family: None,
             key_bindings: default_key_bindings(),
             cursor_shape: CursorShape::default(),
+            theme: None,
         }
+    }
+}
+
+// ---- themes: ghostty-style colorscheme files ----
+
+/// user theme dir: ~/.config/deptty/themes (XDG-aware, like config_dir)
+fn themes_dir() -> std::path::PathBuf {
+    config_dir().join("themes")
+}
+
+/// system theme dir (packaged .deb installs breeze.toml here)
+pub const SYSTEM_THEMES_DIR: &str = "/usr/share/deptty/themes";
+
+/// palette in ghostty theme files: either the classic 16-entry array
+/// (`palette = ["#232627", ...]`) or the newer `N=COLOR` table form
+/// (`palette = { 0 = "#232627", ... }` / `palette.0 = "#232627"`).
+/// 16 entries only (ANSI colors); extra indexes are ignored.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum Palette {
+    List(Vec<String>),
+    Map(std::collections::HashMap<String, String>),
+}
+
+impl Palette {
+    fn get(&self, i: usize) -> Option<&str> {
+        match self {
+            Palette::List(v) => v.get(i).map(String::as_str),
+            Palette::Map(m) => m.get(&i.to_string()).map(String::as_str),
+        }
+    }
+}
+
+/// colorscheme file, ghostty field conventions (kebab-case, hex colors,
+/// optional palette). Unknown keys (cursor-text, selection-*, fonts, ...) are
+/// accepted and ignored so stock ghostty theme files load unmodified.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct Theme {
+    /// file base name without .toml, or "<builtin>" for the embedded default
+    pub name: String,
+    pub background: Option<String>,
+    pub foreground: Option<String>,
+    pub cursor_color: Option<String>,
+    pub palette: Option<Palette>,
+    // accepted for ghostty-file compat; deptty paints selection as a
+    // translucent overlay, so these are parsed but unused
+    pub selection_background: Option<String>,
+    pub selection_foreground: Option<String>,
+    pub cursor_text: Option<String>,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            name: "".into(),
+            background: None,
+            foreground: None,
+            cursor_color: None,
+            palette: None,
+            selection_background: None,
+            selection_foreground: None,
+            cursor_text: None,
+        }
+    }
+}
+
+/// `#rrggbb` or `rrggbb` -> (r, g, b); None on anything else
+pub fn parse_hex(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 {
+        return None;
+    }
+    let v = u32::from_str_radix(h, 16).ok()?;
+    Some(((v >> 16) as u8, (v >> 8) as u8, v as u8))
+}
+
+/// embedded default so `theme = "breeze"` works on dev builds too (the
+/// packaged system dir only exists after `cargo deb`)
+const BREEZE_TOML: &str = include_str!("../themes/breeze.toml");
+
+impl Theme {
+    /// resolve `name` against the user and system theme dirs (user wins), then
+    /// the embedded breeze default. A name containing a path separator or
+    /// ending in `.toml` is treated as a direct file path.
+    pub fn load(name: &str) -> Option<Theme> {
+        Self::load_from(name, &themes_dir(), &std::path::PathBuf::from(SYSTEM_THEMES_DIR))
+    }
+
+    fn load_from(name: &str, user_dir: &std::path::Path, system_dir: &std::path::Path) -> Option<Theme> {
+        let file = Self::find_file(name, user_dir, system_dir);
+        let text = match file {
+            Some(p) => std::fs::read_to_string(&p).ok()?,
+            None => {
+                if name == "breeze" {
+                    BREEZE_TOML.to_owned()
+                } else {
+                    return None;
+                }
+            }
+        };
+        let mut theme: Theme = toml::from_str(&text).ok()?;
+        theme.name = std::path::Path::new(name)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| name.to_owned());
+        Some(theme)
+    }
+
+    fn find_file(name: &str, user_dir: &std::path::Path, system_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        let p = std::path::Path::new(name);
+        if name.contains(std::path::MAIN_SEPARATOR) || name.ends_with(".toml") {
+            return (p.is_file()).then(|| p.to_path_buf());
+        }
+        let f = p.with_extension("toml");
+        let user = user_dir.join(&f);
+        if user.is_file() {
+            return Some(user);
+        }
+        let sys = system_dir.join(&f);
+        if sys.is_file() {
+            return Some(sys);
+        }
+        None
+    }
+
+    pub fn bg(&self) -> Option<(u8, u8, u8)> {
+        self.background.as_deref().and_then(parse_hex)
+    }
+    pub fn fg(&self) -> Option<(u8, u8, u8)> {
+        self.foreground.as_deref().and_then(parse_hex)
+    }
+    pub fn cursor(&self) -> Option<(u8, u8, u8)> {
+        self.cursor_color.as_deref().and_then(parse_hex)
+    }
+    pub fn palette16(&self) -> Option<[(u8, u8, u8); 16]> {
+        let p = self.palette.as_ref()?;
+        let mut out = [(0u8, 0u8, 0u8); 16];
+        for i in 0..16 {
+            out[i] = parse_hex(p.get(i)?)?;
+        }
+        Some(out)
     }
 }
 
@@ -160,6 +306,82 @@ mod tests {
         assert_eq!(cfg.cursor_shape, CursorShape::Beam);
         let cfg: Config = toml::from_str("cursor_shape = \"underline\"").expect("underline parses");
         assert_eq!(cfg.cursor_shape, CursorShape::Underline);
+    }
+
+    #[test]
+    fn theme_key_parses() {
+        let cfg: Config = toml::from_str("theme = \"breeze\"").expect("theme parses");
+        assert_eq!(cfg.theme.as_deref(), Some("breeze"));
+        let cfg: Config = toml::from_str("").expect("empty parses");
+        assert_eq!(cfg.theme, None);
+    }
+
+    fn temp_dirs() -> (std::path::PathBuf, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "deptty-theme-test-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("?")
+        ));
+        let user = base.join("user");
+        let system = base.join("system");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::create_dir_all(&system).unwrap();
+        (user, system)
+    }
+
+    fn write_theme(dir: &std::path::Path, name: &str, bg: &str) {
+        let t = format!("background = \"{bg}\"\nforeground = \"#fcfcfc\"\n");
+        std::fs::write(dir.join(format!("{name}.toml")), t).unwrap();
+    }
+
+    #[test]
+    fn theme_user_overrides_system() {
+        let (user, system) = temp_dirs();
+        write_theme(&system, "x", "#010101");
+        write_theme(&user, "x", "#020202");
+        let t = Theme::load_from("x", &user, &system).unwrap();
+        assert_eq!(t.bg(), Some((2, 2, 2)));
+    }
+
+    #[test]
+    fn theme_system_only_and_unknown() {
+        let (user, system) = temp_dirs();
+        write_theme(&system, "x", "#010101");
+        let t = Theme::load_from("x", &user, &system).unwrap();
+        assert_eq!(t.bg(), Some((1, 1, 1)));
+        assert!(Theme::load_from("nope", &user, &system).is_none());
+    }
+
+    #[test]
+    fn theme_breeze_builtin_always_resolves() {
+        let (user, system) = temp_dirs();
+        let t = Theme::load_from("breeze", &user, &system).unwrap();
+        assert_eq!(t.bg(), Some((0x23, 0x26, 0x27))); // KDE Breeze #232627
+        assert_eq!(t.fg(), Some((0xfc, 0xfc, 0xfc)));
+        let p = t.palette16().unwrap();
+        assert_eq!(p[1], (0xed, 0x15, 0x15)); // red
+        assert_eq!(p[8], (0x7f, 0x8c, 0x8d)); // bright black
+    }
+
+    #[test]
+    fn theme_palette_forms_and_hex() {
+        assert_eq!(parse_hex("#23A6b7"), Some((0x23, 0xa6, 0xb7)));
+        assert_eq!(parse_hex("ffffff"), Some((0xff, 0xff, 0xff)));
+        assert_eq!(parse_hex("#fff"), None);
+        assert_eq!(parse_hex("nope"), None);
+        // array form (all 16)
+        let t: Theme = toml::from_str(
+            "palette = [\"#010203\", \"#040506\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\"]",
+        )
+        .unwrap();
+        assert_eq!(t.palette16().map(|p| (p[0], p[1])), Some(((1, 2, 3), (4, 5, 6))));
+        // ghostty N=COLOR table form (all 16)
+        let t: Theme = toml::from_str(
+            "palette = { 1 = \"#040506\", 0 = \"#010203\", 2 = \"#000000\", 3 = \"#000000\", 4 = \"#000000\", 5 = \"#000000\", 6 = \"#000000\", 7 = \"#000000\", 8 = \"#000000\", 9 = \"#000000\", 10 = \"#000000\", 11 = \"#000000\", 12 = \"#000000\", 13 = \"#000000\", 14 = \"#000000\", 15 = \"#000000\" }",
+        )
+        .unwrap();
+        assert_eq!(t.palette16().map(|p| (p[0], p[1])), Some(((1, 2, 3), (4, 5, 6))));
     }
 
     #[test]

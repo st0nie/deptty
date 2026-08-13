@@ -33,10 +33,16 @@ fn headless_full_session() {
 
     let cfg = Config {
         shell: Some("/bin/bash".into()), // deterministic: no precmd/title tricks
+        theme: Some("breeze".into()),    // colorscheme must apply end-to-end
         ..Default::default()
     };
     let (dapp, app) = deptty::boot(cfg);
     let geom = app.geom.clone();
+    // breeze resolved from the embedded default (no user/system theme dirs in
+    // the test env): KDE Breeze #232627 bg / #fcfcfc fg
+    assert_eq!(app.scheme.bg, (0x23, 0x26, 0x27));
+    assert_eq!(app.scheme.fg, (0xfc, 0xfc, 0xfc));
+    assert_eq!(app.scheme.colors[1], (0xed, 0x15, 0x15)); // red
 
     let done = Rc::new(Cell::new(false));
     let tries = Rc::new(Cell::new(0));

@@ -13,12 +13,13 @@ Working today:
 - tabs (in the titlebar, like deepin-terminal), new/close/switch, cwd inheritance
 - text selection + copy/paste, configurable keybindings
 - scrollback scrollbar + mouse wheel, mouse reporting for vim/htop
+- colorschemes: ghostty-style TOML themes, `breeze` built in (see below)
 - window title from OSC 0/2, tab labels
 - config file at `~/.config/deptty/config.toml`
 - remembered window size (`state.toml`, like deepin-terminal's window_width/height)
 - headless smoke test (`--smoke`)
 
-Not yet: splits, search bar, themes/opacity, quake mode, remote management (SSH),
+Not yet: search bar, opacity, quake mode, remote management (SSH),
 single-instance via zbus, encoding detection, secret storage.
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the design and the mapping of each
 deepin-terminal component to its Rust replacement.
@@ -58,6 +59,7 @@ scrollback = 20000
 shell = "/bin/zsh"
 cursor_shape = "block"  # block | beam | underline (focused pane; unfocused
                         # panes always show a hollow block, deepin-terminal style)
+theme = "breeze"        # colorscheme; omit for the default deepin palette
 
 [[key_bindings]]
 key = "T"            # single char or qt key name: "Left", "F5", "Escape", ...
@@ -73,6 +75,33 @@ split left-right / top-bottom, Ctrl+Tab / Ctrl+Shift+Tab cycle split panes,
 Ctrl+Shift+Up/Down/Left/Right move focus between split panes (konsole
 Focus * Terminal). Same-axis splits share space equally (two splits =
 thirds); closing a pane focuses its split sibling and rebalances the rest.
+
+## Themes
+
+`theme = "name"` picks a colorscheme; missing/unknown names fall back to
+the default palette (no crash). Themes are ghostty-style TOML files looked
+up in order:
+
+1. `~/.config/deptty/themes/<name>.toml` (yours, wins)
+2. `/usr/share/deptty/themes/<name>.toml` (system, installed by the .deb)
+3. `breeze` is embedded as a last resort, so it always works
+
+`theme` can also be a direct path to a `.toml`. The repo ships
+[`themes/breeze.toml`](themes/breeze.toml); copy it to your themes dir and
+edit, or drop in a ghostty theme file (extra keys are ignored):
+
+```toml
+background = "#232627"
+foreground = "#fcfcfc"
+cursor-color = "#eff0f1"
+# 16 ANSI colors; array form, or ghostty's N = "#..." table form
+palette = [
+  "#232627", "#ed1515", "#11d116", "#f67400",
+  "#1d99f3", "#9b59b6", "#1abc9c", "#fcfcfc",
+  "#7f8c8d", "#c0392b", "#1cdc9a", "#fdbc4b",
+  "#3daee9", "#8e44ad", "#16a085", "#ffffff",
+]
+```
 
 ## Layout
 
