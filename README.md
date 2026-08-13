@@ -10,14 +10,17 @@ Working today:
 
 - terminal emulation (VT parsing, screen grid, scrollback) via `alacritty_terminal`
 - PTY via `portable-pty`
-- tabs (in the titlebar, like deepin-terminal), new/close/switch, cwd inheritance
+- tabs (in the titlebar, like deepin-terminal), new/close/switch, tab drag reorder,
+  cwd inheritance
+- split panes: vertical/horizontal dividers, equalized sizing, pane focus cycling
+  and directional focus, right-click menu (new tab/split/close)
 - text selection + copy/paste, configurable keybindings
 - scrollback scrollbar + mouse wheel, mouse reporting for vim/htop
 - colorschemes: ghostty-style TOML themes, `breeze` built in (see below)
-- window title from OSC 0/2, tab labels
+- window title from OSC 0/2, tab labels (follow the focused pane)
 - config file at `~/.config/deptty/config.toml`
 - remembered window size (`state.toml`, like deepin-terminal's window_width/height)
-- headless smoke test (`--smoke`)
+- headless integration test (`cargo test`, real shells offscreen)
 
 Not yet: search bar, opacity, quake mode, remote management (SSH),
 single-instance via zbus, encoding detection, secret storage.
@@ -31,12 +34,16 @@ Requires Linux with Qt6 + DTK6 dev packages (dtk-rs links `dtk6widget`).
 ```sh
 cargo build
 ./target/debug/deptty                  # run
-./target/debug/deptty --workdir /tmp   # start shell in a dir
-QT_QPA_PLATFORM=offscreen ./target/debug/deptty --smoke   # headless smoke test
+./target/debug/deptty -w /tmp          # start shell in a dir
+./target/debug/deptty /tmp             # same, positional dir
+./target/debug/deptty 'file:///tmp'    # dde-file-manager "open in terminal here"
+cargo test                             # unit + headless full-session test
+QT_QPA_PLATFORM=offscreen cargo test --test app   # just the headless session
 ```
 
-Smoke test spawns a real shell, injects `echo DTKTERM_SMOKE_OK`, asserts the
-grid shows it, prints `smoke ok`.
+The integration test boots the real app offscreen (`QT_QPA_PLATFORM=offscreen`),
+spawns real shells, and asserts grid content, splits, tab reorder, selection,
+scrollbar sync, OSC titles, and the exit path.
 
 ## .deb package
 
@@ -114,9 +121,14 @@ palette = [
 ## Layout
 
 ```
-src/main.rs    app: window, tabs, render loop, input, PTY reader threads
-src/config.rs  Config + KeyBinding, TOML loading
-examples/      scratch probes
+src/main.rs    thin entry: main() -> deptty::main_run()
+src/lib.rs     the whole app: window, tabs, split-pane tree, render loop,
+               input, PTY reader threads, right-click menu
+src/config.rs  Config + KeyBinding + Theme, TOML loading, defaults
+locales/       rust-i18n YAML (en, zh-CN); menu strings via t!("menu.*")
+tests/app.rs   headless full-session test (offscreen)
+themes/        shipped colorschemes, installed to /usr/share/deptty/themes
+examples/      scratch probes (font metrics etc.), not part of the app
 ```
 
 The terminal widget itself is one `dtk::PaintWidget`; see ARCHITECTURE.md for

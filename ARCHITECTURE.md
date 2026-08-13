@@ -58,7 +58,8 @@ Color resolution: `cell_colors` -> `rgb_of` against the resolved `Scheme`
 (named 16-color palette + indexed 256 cube + RGB) — the default deepin
 dark/light palette, or the palette of a `theme = "..."` colorscheme, see
 [Themes](#themes). Bold/underline/italic map to `QFont` variants; cursor is
-an inverted rect.
+a translucent overlay (theme `cursor-color` tint; hollow block when
+unfocused, solid shape when focused).
 
 Geometry: `QFont::metrics()` gives cell width/height/ascent (`GridGeom`);
 widget pixel size / cell size = grid cols/lines, fed to alacritty's
