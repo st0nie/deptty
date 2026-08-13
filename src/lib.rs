@@ -1346,6 +1346,17 @@ fn default_title(cfg: &Config) -> String {
     path.rsplit('/').next().unwrap_or("shell").to_string()
 }
 
+/// tab label for a pane: its last known OSC title, or the default label
+/// when it never set one (pane_label is called on focus changes and on
+/// title-apply, so the fallback must never panic)
+fn pane_label(title: &std::sync::Mutex<Option<String>>, cfg: &Config) -> String {
+    title
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| default_title(cfg))
+}
+
 /// shell for a new pane: config shell / $SHELL / bash
 fn shell_cmd(cfg: &Config) -> CommandBuilder {
     let shell = cfg
@@ -1527,7 +1538,7 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
                 QTimer::single_shot(30, move || {
                     me.title_armed
                         .store(false, std::sync::atomic::Ordering::SeqCst);
-                    let t = me.title.lock().unwrap().take();
+                    let t = me.title.lock().unwrap().clone();
                     if let Some(t) = t {
                         let ts = app.tabs.borrow();
                         if let Some((ti, tab)) = ts
@@ -2043,9 +2054,19 @@ fn make_pane(
                 let pws: Vec<PaintWidget> = {
                     let ts = app.tabs.borrow();
                     ts.iter()
-                        .find(|t| t.panes.iter().any(|p| p.id == id))
-                        .map(|t| {
+                        .enumerate()
+                        .find(|(_, t)| t.panes.iter().any(|p| p.id == id))
+                        .map(|(ti, t)| {
                             t.active_pane.set(id);
+                            // tab label follows the focused pane immediately: re-apply
+                            // its last known OSC title (retained in the title slot) or
+                            // the default label when it never set one — titles only
+                            // arrive on OSC events, not on focus changes
+                            let label = pane_label(&shared.title, &app.cfg);
+                            if app.tabbar.tab_text(ti as i32) != label {
+                                app.tabbar.set_tab_text(ti as i32, &label);
+                                app.tabbar.as_widget().flush_layout();
+                            }
                             t.panes.iter().map(|p| p.pw).collect::<Vec<_>>()
                         })
                         .unwrap_or_default()
@@ -2635,6 +2656,20 @@ mod tests {
             press: true,
             autorepeat: false,
         }
+    }
+
+    #[test]
+    fn pane_label_falls_back_to_default() {
+        let cfg = Config {
+            shell: Some("/bin/zsh".into()),
+            ..Default::default()
+        };
+        let slot = std::sync::Mutex::new(None::<String>);
+        // no title ever set: default label (basename of the configured shell)
+        assert_eq!(pane_label(&slot, &cfg), "zsh");
+        *slot.lock().unwrap() = Some("top".into());
+        // last known OSC title wins
+        assert_eq!(pane_label(&slot, &cfg), "top");
     }
 
     #[test]

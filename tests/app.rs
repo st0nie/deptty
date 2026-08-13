@@ -57,6 +57,8 @@ fn headless_full_session() {
     let stty = Rc::new(RefCell::new(None::<(Arc<deptty::Shared>, String)>));
     let pane_ids = Rc::new(RefCell::new(None::<(u64, u64, u64, u64)>));
     let closed3 = Rc::new(Cell::new(false));
+    // pane-focus -> tab label regression stages (0..4)
+    let title_stage = Rc::new(Cell::new(0i32));
     let poll = Rc::new(RefCell::new(None::<Box<dyn FnMut()>>));
     let poll2 = poll.clone();
     *poll.borrow_mut() = Some(Box::new({
@@ -229,6 +231,15 @@ fn headless_full_session() {
                         s1.write(b"echo DTKTERM_VSPLIT_OK\n");
                         s2.write(b"echo DTKTERM_VSPLIT_OK\n");
                         s3.write(b"echo DTKTERM_HSPLIT_OK\n");
+                        // distinct OSC titles for the pane-focus regression:
+                        // p1 is the focused pane right now (focus left landed
+                        // there), so P1_TITLE applies to the tab; P2_TITLE is
+                        // s2's, applied only when p2 gains focus. sleep holds
+                        // the shells at the prompt so their PROMPT_COMMAND
+                        // title doesn't overwrite the test titles (same guard
+                        // as the SMOKE_TITLE printf on tab 0)
+                        s1.write(b"printf '\\x1b]2;P1_TITLE\\x07'; sleep 3\n");
+                        s2.write(b"printf '\\x1b]2;P2_TITLE\\x07'; sleep 3\n");
                         *split1.borrow_mut() = Some(s1);
                         *split2.borrow_mut() = Some(s2);
                         *split3.borrow_mut() = Some(s3);
@@ -265,7 +276,66 @@ fn headless_full_session() {
                             && split_ok(&split3)
                             && stty_ok
                         {
-                            if !closed3.get() {
+                            // regression: switching pane focus must re-apply the
+                            // tab label from the newly focused pane's last known
+                            // title immediately (no new OSC event); a pane that
+                            // never set a title falls back to the default label
+                            let stage = title_stage.get();
+                            if stage < 4 {
+                                let (p0, _p1, p2, _p3) = *pane_ids.borrow().as_ref().unwrap();
+                                let label = app.tabbar.tab_text(1);
+                                match stage {
+                                    0 => {
+                                        // s1's title reached the tab while p1 was focused
+                                        assert_eq!(label, "P1_TITLE", "active pane title not applied");
+                                        deptty::focus_pane_dir(&app, 1, 0); // p1 -> p2
+                                    }
+                                    1 => {
+                                        // label followed the focus switch immediately
+                                        assert_eq!(
+                                            tab1_active_pane(),
+                                            Some(p2),
+                                            "focus right failed"
+                                        );
+                                        assert_eq!(
+                                            label, "P2_TITLE",
+                                            "label must follow focused pane immediately"
+                                        );
+                                        deptty::focus_pane_dir(&app, -1, 0); // p2 -> p1
+                                        deptty::focus_pane_dir(&app, -1, 0); // p1 -> p0
+                                    }
+                                    2 => {
+                                        // p0 never got a test title (its shell
+                                        // title is its own prompt's, or none):
+                                        // the label must have left the previous
+                                        // pane's title behind, immediately
+                                        assert_eq!(
+                                            tab1_active_pane(),
+                                            Some(p0),
+                                            "focus left failed"
+                                        );
+                                        assert_ne!(
+                                            label, "P1_TITLE",
+                                            "label must follow the newly focused pane"
+                                        );
+                                        assert_ne!(
+                                            label, "P2_TITLE",
+                                            "label must follow the newly focused pane"
+                                        );
+                                        deptty::focus_pane_dir(&app, 1, 0); // p0 -> p1
+                                    }
+                                    3 => {
+                                        // retained title reapplies when focus returns
+                                        assert_eq!(
+                                            label, "P1_TITLE",
+                                            "retained title must reapply on focus back"
+                                        );
+                                        deptty::focus_pane_dir(&app, 1, 0); // p1 -> p2, restore focus
+                                    }
+                                    _ => unreachable!(),
+                                }
+                                title_stage.set(stage + 1);
+                            } else if !closed3.get() {
                                 // close the bottom-right pane (Ctrl+D path): the
                                 // reader EOF poke tears it down asynchronously
                                 closed3.set(true);
