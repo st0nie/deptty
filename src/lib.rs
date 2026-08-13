@@ -748,10 +748,10 @@ fn cursor_rects(cur: Cursor, cw: i32, ch: i32) -> Vec<(i32, i32, i32, i32)> {
         (true, Beam) => vec![(0, 0, t, ch)],
         (true, Underline) => vec![(0, ch - t, cw, t)],
         (false, _) => vec![
-            (0, 0, cw, t),
-            (0, ch - t, cw, t),
-            (0, 0, t, ch),
-            (cw - t, 0, t, ch),
+            (0, 0, cw, t),                       // top
+            (0, ch - t, cw, t),                  // bottom
+            (0, t, t, (ch - 2 * t).max(0)),      // left, clipped to the band
+            (cw - t, t, t, (ch - 2 * t).max(0)), // right, clipped to the band
         ],
     }
 }
@@ -2710,11 +2710,13 @@ mod tests {
         // beam: thin bar on the left edge; underline: thin bar at the bottom
         assert_eq!(solid(Beam), vec![(0, 0, 2, 20)]);
         assert_eq!(solid(Underline), vec![(0, 18, 10, 2)]);
-        // unfocused pane: hollow block outline, whatever the configured shape
+        // unfocused pane: hollow block outline, whatever the configured shape.
+        // Left/right strokes are clipped to the band so corners never stack
+        // two translucent layers (which painted lighter than the rest)
         for shape in [Block, Beam, Underline] {
             assert_eq!(
                 hollow(shape),
-                vec![(0, 0, 10, 2), (0, 18, 10, 2), (0, 0, 2, 20), (8, 0, 2, 20)]
+                vec![(0, 0, 10, 2), (0, 18, 10, 2), (0, 2, 2, 16), (8, 2, 2, 16)]
             );
         }
     }
