@@ -16,7 +16,7 @@ use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::term::{self, Term};
-use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, StdSyncHandler};
+use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, StdSyncHandler};
 use config::{Config, Theme};
 use dtk::widgets::DTabBar;
 use dtk::*;
@@ -758,29 +758,45 @@ fn snapshot_grid(term: &AppTerm) -> GridSnap {
     }
 }
 
-/// text cursor presentation for one paint: `shape` from config, `focused` =
-/// this pane has input focus. Unfocused panes draw a hollow block whatever the
-/// configured shape (deepin-terminal focus hint); ponytail: no blink
+/// text cursor presentation for one paint: `shape` is the terminal's live
+/// DECSCUSR shape (`CSI Ps SP q`, falling back to the configured default),
+/// `focused` = this pane has input focus. Unfocused panes draw a hollow
+/// block whatever the shape (deepin-terminal focus hint); ponytail: no blink
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
-    pub shape: config::CursorShape,
+    pub shape: CursorShape,
     pub focused: bool,
 }
 
 /// cursor overlay rects, cell-local px (x, y, w, h)
 fn cursor_rects(cur: Cursor, cw: i32, ch: i32) -> Vec<(i32, i32, i32, i32)> {
-    use config::CursorShape::*;
+    use CursorShape::*;
     let t = (ch / 8).max(1); // stroke/line thickness
-    match (cur.focused, cur.shape) {
-        (true, Block) => vec![(0, 0, cw, ch)],
-        (true, Beam) => vec![(0, 0, t, ch)],
-        (true, Underline) => vec![(0, ch - t, cw, t)],
-        (false, _) => vec![
+    if !cur.focused {
+        // hollow block outline, whatever the app requested. Left/right strokes
+        // are clipped to the band so corners never stack two translucent
+        // layers (which painted lighter than the rest)
+        return vec![
             (0, 0, cw, t),                       // top
             (0, ch - t, cw, t),                  // bottom
             (0, t, t, (ch - 2 * t).max(0)),      // left, clipped to the band
             (cw - t, t, t, (ch - 2 * t).max(0)), // right, clipped to the band
+        ];
+    }
+    match cur.shape {
+        Block => vec![(0, 0, cw, ch)],
+        Beam => vec![(0, 0, t, ch)],
+        Underline => vec![(0, ch - t, cw, t)],
+        // DECSCUSR never produces HollowBlock (1|2 block, 3|4 underline,
+        // 5|6 beam) — arm kept for the enum's exhaustive match
+        HollowBlock => vec![
+            (0, 0, cw, t),
+            (0, ch - t, cw, t),
+            (0, t, t, (ch - 2 * t).max(0)),
+            (cw - t, t, t, (ch - 2 * t).max(0)),
         ],
+        // DECSCUSR 0/… or DECTCEM hidden cursor: nothing
+        Hidden => vec![],
     }
 }
 
@@ -1381,6 +1397,16 @@ fn spawn_shell(
     let term = Term::new(
         term::Config {
             scrolling_history: cfg.scrollback,
+            // DECSCUSR fallback: `cursor_shape` config until the app sends
+            // `CSI Ps SP q`; vim's t_SI/t_EI then take over per-mode
+            default_cursor_style: alacritty_terminal::vte::ansi::CursorStyle {
+                shape: match cfg.cursor_shape {
+                    config::CursorShape::Block => CursorShape::Block,
+                    config::CursorShape::Beam => CursorShape::Beam,
+                    config::CursorShape::Underline => CursorShape::Underline,
+                },
+                blinking: false,
+            },
             ..Default::default()
         },
         &Size { cols, lines },
@@ -1744,11 +1770,13 @@ fn make_pane(
         let pane_drag = Rc::new(Cell::new(None::<u64>));
         move |ev| match ev {
             PaintWidgetEvent::Paint(p, w, h) => {
-                // short lock: snapshot the grid, then paint unlocked so the
-                // reader thread never waits on QPainter
-                let snap = {
+                // short lock: snapshot the grid + live cursor shape, then paint
+                // unlocked so the reader thread never waits on QPainter
+                let (snap, cshape) = {
                     let term = shared.term.lock();
-                    snapshot_grid(&term)
+                    let s = snapshot_grid(&term);
+                    let shape = term.cursor_style().shape; // DECSCUSR or default
+                    (s, shape)
                 };
                 let focused = {
                     let ts = app.tabs.borrow();
@@ -1757,7 +1785,7 @@ fn make_pane(
                         .is_some_and(|t| t.active_pane.get() == id)
                 };
                 let cur = Cursor {
-                    shape: app.cfg.cursor_shape,
+                    shape: cshape,
                     focused,
                 };
                 render(&snap, &p, &geom, &fonts, w, h, 0, cur, &app.scheme);
@@ -2762,7 +2790,7 @@ mod tests {
 
     #[test]
     fn cursor_shapes() {
-        use config::CursorShape::*;
+        use CursorShape::*;
         let solid = |shape| {
             cursor_rects(
                 Cursor {
@@ -2787,14 +2815,16 @@ mod tests {
         // beam: thin bar on the left edge; underline: thin bar at the bottom
         assert_eq!(solid(Beam), vec![(0, 0, 2, 20)]);
         assert_eq!(solid(Underline), vec![(0, 18, 10, 2)]);
-        // unfocused pane: hollow block outline, whatever the configured shape.
+        // DECSCUSR hollow block = same outline as the unfocused hint
+        let hollow_rects = vec![(0, 0, 10, 2), (0, 18, 10, 2), (0, 2, 2, 16), (8, 2, 2, 16)];
+        assert_eq!(solid(HollowBlock), hollow_rects);
+        // DECSCUSR hidden cursor: nothing drawn
+        assert_eq!(solid(Hidden), Vec::<((i32, i32, i32, i32))>::new());
+        // unfocused pane: hollow block outline, whatever the shape.
         // Left/right strokes are clipped to the band so corners never stack
         // two translucent layers (which painted lighter than the rest)
-        for shape in [Block, Beam, Underline] {
-            assert_eq!(
-                hollow(shape),
-                vec![(0, 0, 10, 2), (0, 18, 10, 2), (0, 2, 2, 16), (8, 2, 2, 16)]
-            );
+        for shape in [Block, Beam, Underline, HollowBlock, Hidden] {
+            assert_eq!(hollow(shape), hollow_rects);
         }
     }
 

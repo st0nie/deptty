@@ -11,6 +11,7 @@ use deptty::alacritty_terminal::grid::Dimensions as _;
 use deptty::alacritty_terminal::index::{Column, Line, Point, Side};
 use deptty::alacritty_terminal::selection::{Selection, SelectionType};
 use deptty::alacritty_terminal::term::cell::Flags;
+use deptty::alacritty_terminal::vte::ansi::CursorShape;
 use deptty::config::Config;
 use deptty::dtk::*;
 use deptty::{App, grid_text};
@@ -59,6 +60,9 @@ fn headless_full_session() {
     let closed3 = Rc::new(Cell::new(false));
     // pane-focus -> tab label regression stages (0..4)
     let title_stage = Rc::new(Cell::new(0i32));
+    // DECSCUSR (CSI Ps SP q) stages: 0 inject beam, 1 assert, 2 inject block,
+    // 3 assert, 4 reset to default
+    let dec_stage = Rc::new(Cell::new(0i32));
     let poll = Rc::new(RefCell::new(None::<Box<dyn FnMut()>>));
     let poll2 = poll.clone();
     *poll.borrow_mut() = Some(Box::new({
@@ -89,6 +93,51 @@ fn headless_full_session() {
             {
                 let mut term = tab0.term().lock();
                 if grid_text(&term).contains("DTKTERM_SMOKE_OK") {
+                    // DECSCUSR regression: vim's t_SI/t_EI (`\e[6 q` beam,
+                    // `\e[2 q` block) must change the live cursor shape, and
+                    // `\e[0 q` resets to the configured default
+                    let d = dec_stage.get();
+                    if d < 5 {
+                        match d {
+                            // printf: raw CSI to the pty would sit in readline's
+                            // input buffer; the shell command prints it to stdout
+                            0 => tab0.write(b"printf '\\x1b[6 q'\n"),
+                            1 => {
+                                assert_eq!(
+                                    term.cursor_style().shape,
+                                    CursorShape::Beam,
+                                    "DECSCUSR 6 q must set a beam cursor"
+                                );
+                                tab0.write(b"printf '\\x1b[2 q'\n");
+                            }
+                            2 => {
+                                assert_eq!(
+                                    term.cursor_style().shape,
+                                    CursorShape::Block,
+                                    "DECSCUSR 2 q must set a block cursor"
+                                );
+                                tab0.write(b"printf '\\x1b[4 q'\n");
+                            }
+                            3 => {
+                                // DECSCUSR: 1|2 block, 3|4 underline, 5|6 beam
+                                assert_eq!(
+                                    term.cursor_style().shape,
+                                    CursorShape::Underline,
+                                    "DECSCUSR 4 q must set a steady underline"
+                                );
+                                tab0.write(b"printf '\\x1b[0 q'\n");
+                            }
+                            4 => {
+                                assert_eq!(
+                                    term.cursor_style().shape,
+                                    CursorShape::Block,
+                                    "DECSCUSR 0 q must reset to the default (block)"
+                                );
+                            }
+                            _ => unreachable!(),
+                        }
+                        dec_stage.set(d + 1);
+                    }
                     // selection + clipboard path: select the marker, copy it
                     let (mut line, mut start, mut end) = (-1i32, 0usize, 0usize);
                     let mut cur = String::new();
@@ -245,7 +294,9 @@ fn headless_full_session() {
                         *split3.borrow_mut() = Some(s3);
                     }
                     // OSC title -> tab label (sync happens on the next paint)
-                    if !titled.replace(true) {
+                    // (deferred until the DECSCUSR stages finish: the SMOKE_TITLE
+                    // command queues `sleep 3` behind everything written before it)
+                    if dec_stage.get() >= 5 && !titled.replace(true) {
                         // sleep holds off the prompt (and zsh precmd title resets);
                         // second printf paints one letter per SGR attribute for flag asserts
                         tab0.write(
