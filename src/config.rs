@@ -129,10 +129,18 @@ impl Theme {
     /// the embedded breeze default. A name containing a path separator or
     /// ending in `.toml` is treated as a direct file path.
     pub fn load(name: &str) -> Option<Theme> {
-        Self::load_from(name, &themes_dir(), &std::path::PathBuf::from(SYSTEM_THEMES_DIR))
+        Self::load_from(
+            name,
+            &themes_dir(),
+            &std::path::PathBuf::from(SYSTEM_THEMES_DIR),
+        )
     }
 
-    fn load_from(name: &str, user_dir: &std::path::Path, system_dir: &std::path::Path) -> Option<Theme> {
+    fn load_from(
+        name: &str,
+        user_dir: &std::path::Path,
+        system_dir: &std::path::Path,
+    ) -> Option<Theme> {
         let file = Self::find_file(name, user_dir, system_dir);
         let text = match file {
             Some(p) => std::fs::read_to_string(&p).ok()?,
@@ -152,7 +160,11 @@ impl Theme {
         Some(theme)
     }
 
-    fn find_file(name: &str, user_dir: &std::path::Path, system_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    fn find_file(
+        name: &str,
+        user_dir: &std::path::Path,
+        system_dir: &std::path::Path,
+    ) -> Option<std::path::PathBuf> {
         let p = std::path::Path::new(name);
         if name.contains(std::path::MAIN_SEPARATOR) || name.ends_with(".toml") {
             return (p.is_file()).then(|| p.to_path_buf());
@@ -375,13 +387,19 @@ mod tests {
             "palette = [\"#010203\", \"#040506\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\", \"#000000\"]",
         )
         .unwrap();
-        assert_eq!(t.palette16().map(|p| (p[0], p[1])), Some(((1, 2, 3), (4, 5, 6))));
+        assert_eq!(
+            t.palette16().map(|p| (p[0], p[1])),
+            Some(((1, 2, 3), (4, 5, 6)))
+        );
         // ghostty N=COLOR table form (all 16)
         let t: Theme = toml::from_str(
             "palette = { 1 = \"#040506\", 0 = \"#010203\", 2 = \"#000000\", 3 = \"#000000\", 4 = \"#000000\", 5 = \"#000000\", 6 = \"#000000\", 7 = \"#000000\", 8 = \"#000000\", 9 = \"#000000\", 10 = \"#000000\", 11 = \"#000000\", 12 = \"#000000\", 13 = \"#000000\", 14 = \"#000000\", 15 = \"#000000\" }",
         )
         .unwrap();
-        assert_eq!(t.palette16().map(|p| (p[0], p[1])), Some(((1, 2, 3), (4, 5, 6))));
+        assert_eq!(
+            t.palette16().map(|p| (p[0], p[1])),
+            Some(((1, 2, 3), (4, 5, 6)))
+        );
     }
 
     #[test]
@@ -401,10 +419,16 @@ mod tests {
             let t = Theme::load_from(&name, &user, &system).expect("theme loads");
             assert!(t.bg().is_some(), "{name}: missing background");
             assert!(t.fg().is_some(), "{name}: missing foreground");
-            assert!(t.palette16().is_some(), "{name}: palette must have 16 valid hex");
+            assert!(
+                t.palette16().is_some(),
+                "{name}: palette must have 16 valid hex"
+            );
             found += 1;
         }
-        assert!(found >= 8, "expected at least 8 shipped themes, got {found}");
+        assert!(
+            found >= 8,
+            "expected at least 8 shipped themes, got {found}"
+        );
     }
 
     #[test]

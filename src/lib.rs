@@ -166,11 +166,14 @@ fn default_scheme() -> Scheme {
 /// resolve a configured theme into a Scheme; `None` (no theme key or a
 /// missing/unparseable theme file) falls back to the default palette
 pub fn scheme_for(theme: Option<&Theme>) -> Scheme {
-    let Some(t) = theme else { return default_scheme() };
+    let Some(t) = theme else {
+        return default_scheme();
+    };
     let mut sc = default_scheme();
     if let Some(bg) = t.bg() {
         sc.bg = bg;
-        sc.dark = (u32::from(bg.0) * 299 + u32::from(bg.1) * 587 + u32::from(bg.2) * 114) / 1000 < 128;
+        sc.dark =
+            (u32::from(bg.0) * 299 + u32::from(bg.1) * 587 + u32::from(bg.2) * 114) / 1000 < 128;
     }
     if let Some(fg) = t.fg() {
         sc.fg = fg;
@@ -275,6 +278,11 @@ fn rgb_of(c: Color, sc: &Scheme) -> (u8, u8, u8) {
 fn color_q(c: Color, sc: &Scheme) -> QColor {
     let (r, g, b) = rgb_of(c, sc);
     QColor::rgb(i32::from(r), i32::from(g), i32::from(b))
+}
+
+fn should_paint_cell_bg(is_cursor: bool, cursor_hidden: bool, selected: bool, bg: Color) -> bool {
+    (selected || !matches!(bg, Color::Named(NamedColor::Background)))
+        && (!is_cursor || cursor_hidden)
 }
 
 // ---- keyboard -> PTY bytes ----
@@ -844,25 +852,15 @@ fn render(
         let wide = cell.flags.contains(Flags::WIDE_CHAR);
         let span = if wide { 2 } else { 1 };
         let (fg, bg) = cell_colors(cell);
-        let st = RunStyle::of(cell, fg);
         // cursor on either cell of a wide char covers both
         let cur_col = cursor.column.0;
         let is_cursor = offset == 0
             && i64::from(cursor.line.0) == line
             && (cur_col == col || (wide && cur_col == col + 1));
+        let cursor_hidden = is_cursor && cur.shape == CursorShape::Hidden;
+        let st = RunStyle::of(cell, fg);
         let selected = sel.is_some_and(|r| r.contains(cs.point));
-        if is_cursor {
-            let q = QColor::rgba(
-                i32::from(sc.cursor.0),
-                i32::from(sc.cursor.1),
-                i32::from(sc.cursor.2),
-                110,
-            );
-            let (cx, cy) = (col as i32 * g.cell_w, y_off + line as i32 * g.cell_h);
-            for (rx, ry, rw, rh) in cursor_rects(cur, span * g.cell_w, g.cell_h) {
-                p.fill_rect(cx + rx, cy + ry, rw, rh, &q);
-            }
-        } else if selected || !matches!(bg, Color::Named(NamedColor::Background)) {
+        if should_paint_cell_bg(is_cursor, cursor_hidden, selected, bg) {
             let (o_r, o_g, o_b) = if sc.dark { (255, 255, 255) } else { (0, 0, 0) };
             let q = if selected {
                 QColor::rgba(o_r, o_g, o_b, 60)
@@ -876,6 +874,18 @@ fn render(
                 g.cell_h,
                 &q,
             );
+        }
+        if is_cursor && !cursor_hidden {
+            let q = QColor::rgba(
+                i32::from(sc.cursor.0),
+                i32::from(sc.cursor.1),
+                i32::from(sc.cursor.2),
+                110,
+            );
+            let (cx, cy) = (col as i32 * g.cell_w, y_off + line as i32 * g.cell_h);
+            for (rx, ry, rw, rh) in cursor_rects(cur, span * g.cell_w, g.cell_h) {
+                p.fill_rect(cx + rx, cy + ry, rw, rh, &q);
+            }
         }
         if cell.c == '\0' {
             continue; // wide-char padding: bg handled, no glyph
@@ -2495,7 +2505,10 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
     // breeze fallback); missing/unknown themes fall back to the default palette
     let theme = cfg.theme.as_deref().and_then(Theme::load);
     if cfg.theme.is_some() && theme.is_none() {
-        eprintln!("deptty: theme '{}' not found, using default", cfg.theme.as_deref().unwrap());
+        eprintln!(
+            "deptty: theme '{}' not found, using default",
+            cfg.theme.as_deref().unwrap()
+        );
     }
     let scheme = scheme_for(theme.as_ref());
 
@@ -2839,6 +2852,23 @@ mod tests {
     }
 
     #[test]
+    fn hidden_cursor_still_paints_cell_background() {
+        assert!(should_paint_cell_bg(true, true, false, Color::Indexed(42)));
+        assert!(should_paint_cell_bg(
+            true,
+            true,
+            true,
+            Color::Named(NamedColor::Background)
+        ));
+        assert!(!should_paint_cell_bg(
+            true,
+            false,
+            false,
+            Color::Indexed(42)
+        ));
+    }
+
+    #[test]
     fn pane_key_matching() {
         let cfg = Config::default();
         // konsole view cycling: Ctrl+Tab / Ctrl+Shift+Tab (Qt: Shift+Tab = Backtab)
@@ -2855,13 +2885,31 @@ mod tests {
         assert_eq!(match_action(&cfg, key::BACKTAB, modifier::SHIFT), None);
         // konsole directional view focus: Ctrl+Shift+arrows
         let cs = modifier::CONTROL | modifier::SHIFT;
-        assert_eq!(match_action(&cfg, key::UP, cs), Some(config::Action::FocusPaneUp));
-        assert_eq!(match_action(&cfg, key::DOWN, cs), Some(config::Action::FocusPaneDown));
-        assert_eq!(match_action(&cfg, key::LEFT, cs), Some(config::Action::FocusPaneLeft));
-        assert_eq!(match_action(&cfg, key::RIGHT, cs), Some(config::Action::FocusPaneRight));
+        assert_eq!(
+            match_action(&cfg, key::UP, cs),
+            Some(config::Action::FocusPaneUp)
+        );
+        assert_eq!(
+            match_action(&cfg, key::DOWN, cs),
+            Some(config::Action::FocusPaneDown)
+        );
+        assert_eq!(
+            match_action(&cfg, key::LEFT, cs),
+            Some(config::Action::FocusPaneLeft)
+        );
+        assert_eq!(
+            match_action(&cfg, key::RIGHT, cs),
+            Some(config::Action::FocusPaneRight)
+        );
         // konsole tab nav: Shift+Left/Right (no Ctrl)
-        assert_eq!(match_action(&cfg, key::LEFT, modifier::SHIFT), Some(config::Action::PrevTab));
-        assert_eq!(match_action(&cfg, key::RIGHT, modifier::SHIFT), Some(config::Action::NextTab));
+        assert_eq!(
+            match_action(&cfg, key::LEFT, modifier::SHIFT),
+            Some(config::Action::PrevTab)
+        );
+        assert_eq!(
+            match_action(&cfg, key::RIGHT, modifier::SHIFT),
+            Some(config::Action::NextTab)
+        );
         // plain arrows still go to the shell
         assert_eq!(match_action(&cfg, key::LEFT, 0), None);
         assert_eq!(match_action(&cfg, key::RIGHT, 0), None);
@@ -2967,21 +3015,40 @@ mod tests {
             b: Box::new(b),
         };
         let mut t = Node::Leaf(1);
-        assert!(replace_leaf(&mut t, 1, split(false, Node::Leaf(1), Node::Leaf(2))));
+        assert!(replace_leaf(
+            &mut t,
+            1,
+            split(false, Node::Leaf(1), Node::Leaf(2))
+        ));
         equalize_axis(&mut t, false);
-        assert!(replace_leaf(&mut t, 2, split(true, Node::Leaf(2), Node::Leaf(3))));
+        assert!(replace_leaf(
+            &mut t,
+            2,
+            split(true, Node::Leaf(2), Node::Leaf(3))
+        ));
         equalize_axis(&mut t, true);
-        assert!(replace_leaf(&mut t, 3, split(false, Node::Leaf(3), Node::Leaf(4))));
+        assert!(replace_leaf(
+            &mut t,
+            3,
+            split(false, Node::Leaf(3), Node::Leaf(4))
+        ));
         equalize_axis(&mut t, false);
         // 99x80, DIV=2: top pane keeps half the height; the bottom-right
         // column splits horizontally into halves
         let r = |t: &Node, id: u64| rect_of(t, id, 0, 0, 99, 80).unwrap();
         assert_eq!(r(&t, 1).3, 39, "top pane must keep half the window");
         assert_eq!(r(&t, 2).3, 39, "bottom-left column keeps the other half");
-        assert!((r(&t, 3).3 - r(&t, 4).3).abs() <= 1, "bottom-right splits horizontally");
+        assert!(
+            (r(&t, 3).3 - r(&t, 4).3).abs() <= 1,
+            "bottom-right splits horizontally"
+        );
         // the same strip re-equalizes when the top pane is split again:
         // three horizontal slots, each about a third of the height
-        assert!(replace_leaf(&mut t, 1, split(false, Node::Leaf(1), Node::Leaf(5))));
+        assert!(replace_leaf(
+            &mut t,
+            1,
+            split(false, Node::Leaf(1), Node::Leaf(5))
+        ));
         equalize_axis(&mut t, false);
         for id in [1, 5, 2] {
             let h = r(&t, id).3;
