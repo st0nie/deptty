@@ -772,6 +772,10 @@ pub struct Cursor {
 fn cursor_rects(cur: Cursor, cw: i32, ch: i32) -> Vec<(i32, i32, i32, i32)> {
     use CursorShape::*;
     let t = (ch / 8).max(1); // stroke/line thickness
+    // DECTCEM-hidden cursor stays hidden even on an unfocused pane
+    if cur.shape == Hidden {
+        return vec![];
+    }
     if !cur.focused {
         // hollow block outline, whatever the app requested. Left/right strokes
         // are clipped to the band so corners never stack two translucent
@@ -1775,7 +1779,12 @@ fn make_pane(
                 let (snap, cshape) = {
                     let term = shared.term.lock();
                     let s = snapshot_grid(&term);
-                    let shape = term.cursor_style().shape; // DECSCUSR or default
+                    // DECTCEM `CSI ? 25 l/h`: mode bit wins over DECSCUSR shape
+                    let shape = if term.mode().contains(TermMode::SHOW_CURSOR) {
+                        term.cursor_style().shape // DECSCUSR or default
+                    } else {
+                        CursorShape::Hidden
+                    };
                     (s, shape)
                 };
                 let focused = {
@@ -2818,12 +2827,13 @@ mod tests {
         // DECSCUSR hollow block = same outline as the unfocused hint
         let hollow_rects = vec![(0, 0, 10, 2), (0, 18, 10, 2), (0, 2, 2, 16), (8, 2, 2, 16)];
         assert_eq!(solid(HollowBlock), hollow_rects);
-        // DECSCUSR hidden cursor: nothing drawn
+        // DECSCUSR/DECTCEM hidden cursor: nothing drawn, even unfocused
         assert_eq!(solid(Hidden), Vec::<((i32, i32, i32, i32))>::new());
+        assert_eq!(hollow(Hidden), Vec::<((i32, i32, i32, i32))>::new());
         // unfocused pane: hollow block outline, whatever the shape.
         // Left/right strokes are clipped to the band so corners never stack
         // two translucent layers (which painted lighter than the rest)
-        for shape in [Block, Beam, Underline, HollowBlock, Hidden] {
+        for shape in [Block, Beam, Underline, HollowBlock] {
             assert_eq!(hollow(shape), hollow_rects);
         }
     }
