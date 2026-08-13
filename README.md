@@ -50,7 +50,9 @@ cargo deb        # -> target/debian/deptty_<ver>_amd64.deb
 
 ## Config
 
-`~/.config/deptty/config.toml` (all keys optional):
+`~/.config/deptty/config.toml` (all keys optional) — see
+[**CONFIG.md**](CONFIG.md) for the full reference: every option, keybinding
+syntax and defaults, cursor shapes, and the theme format.
 
 ```toml
 font_family = "Fira Code"
@@ -62,7 +64,7 @@ cursor_shape = "block"  # block | beam | underline (focused pane; unfocused
 theme = "breeze"        # colorscheme; omit for the default deepin palette
 
 [[key_bindings]]
-key = "T"            # single char or qt key name: "Left", "F5", "Escape", ...
+key = "T"            # single char or qt key name: "Left", "PageUp", "Escape", ...
 mods = "Ctrl+Shift"  # "+"-joined: Ctrl, Shift, Alt
 action = "new_tab"   # copy | paste | new_tab | close_tab | next_tab | prev_tab
                      # split_horizontal | split_vertical | next_pane | prev_pane
