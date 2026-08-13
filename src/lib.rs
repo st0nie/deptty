@@ -2734,6 +2734,18 @@ mod tests {
         // plain / shift-only tab stays with the shell (\t / CSI Z)
         assert_eq!(match_action(&cfg, key::TAB, 0), None);
         assert_eq!(match_action(&cfg, key::BACKTAB, modifier::SHIFT), None);
+        // konsole directional view focus: Ctrl+Shift+arrows
+        let cs = modifier::CONTROL | modifier::SHIFT;
+        assert_eq!(match_action(&cfg, key::UP, cs), Some(config::Action::FocusPaneUp));
+        assert_eq!(match_action(&cfg, key::DOWN, cs), Some(config::Action::FocusPaneDown));
+        assert_eq!(match_action(&cfg, key::LEFT, cs), Some(config::Action::FocusPaneLeft));
+        assert_eq!(match_action(&cfg, key::RIGHT, cs), Some(config::Action::FocusPaneRight));
+        // konsole tab nav: Shift+Left/Right (no Ctrl)
+        assert_eq!(match_action(&cfg, key::LEFT, modifier::SHIFT), Some(config::Action::PrevTab));
+        assert_eq!(match_action(&cfg, key::RIGHT, modifier::SHIFT), Some(config::Action::NextTab));
+        // plain arrows still go to the shell
+        assert_eq!(match_action(&cfg, key::LEFT, 0), None);
+        assert_eq!(match_action(&cfg, key::RIGHT, 0), None);
     }
 
     #[test]

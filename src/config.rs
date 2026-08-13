@@ -85,16 +85,22 @@ fn default_key_bindings() -> Vec<KeyBinding> {
         kb("V", "Ctrl+Shift", Action::Paste),
         kb("T", "Ctrl+Shift", Action::NewTab),
         kb("W", "Ctrl+Shift", Action::CloseTab),
-        kb("Right", "Ctrl+Shift", Action::NextTab),
-        kb("Left", "Ctrl+Shift", Action::PrevTab),
+        // konsole tab nav: Shift+Left/Right
+        kb("Right", "Shift", Action::NextTab),
+        kb("Left", "Shift", Action::PrevTab),
         // konsole split defaults: Ctrl+Shift+( left/right, Ctrl+Shift+) top/bottom
         kb("(", "Ctrl+Shift", Action::SplitVertical),
         kb(")", "Ctrl+Shift", Action::SplitHorizontal),
         // konsole view cycling: Ctrl+Tab next pane, Ctrl+Shift+Tab previous
-        // (Qt delivers Shift+Tab as Key_Backtab). No directional defaults:
-        // konsole has none, and deepin's Alt+arrows collide with shell apps
+        // (Qt delivers Shift+Tab as Key_Backtab); directional focus is the
+        // Ctrl+Shift+arrows below, matching konsole's Focus * Terminal actions
         kb("Tab", "Ctrl", Action::NextPane),
         kb("Backtab", "Ctrl+Shift", Action::PrevPane),
+        // konsole directional view focus (Focus Above/Below/Left/Right Terminal)
+        kb("Up", "Ctrl+Shift", Action::FocusPaneUp),
+        kb("Down", "Ctrl+Shift", Action::FocusPaneDown),
+        kb("Left", "Ctrl+Shift", Action::FocusPaneLeft),
+        kb("Right", "Ctrl+Shift", Action::FocusPaneRight),
     ]
 }
 
@@ -166,8 +172,15 @@ mod tests {
         };
         assert!(has("Tab", "Ctrl", Action::NextPane));
         assert!(has("Backtab", "Ctrl+Shift", Action::PrevPane));
-        // directional focus has no default binding (alt+arrows break shell apps)
-        // but stays user-configurable
+        // konsole directional view focus
+        assert!(has("Up", "Ctrl+Shift", Action::FocusPaneUp));
+        assert!(has("Down", "Ctrl+Shift", Action::FocusPaneDown));
+        assert!(has("Left", "Ctrl+Shift", Action::FocusPaneLeft));
+        assert!(has("Right", "Ctrl+Shift", Action::FocusPaneRight));
+        // konsole tab nav is plain Shift+arrows; the Ctrl+Shift+arrow slot
+        // belongs to pane focus, so no Alt defaults anywhere
+        assert!(has("Left", "Shift", Action::PrevTab));
+        assert!(has("Right", "Shift", Action::NextTab));
         assert!(cfg.key_bindings.iter().all(|b| b.mods != "Alt"));
     }
 }
