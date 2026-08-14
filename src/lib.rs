@@ -704,6 +704,17 @@ fn try_report_mouse(shared: &Arc<Shared>, m: &MouseEvent, g: &GridGeom) -> bool 
     }
     let col = (m.x / g.cell_w).clamp(0, term.grid().columns() as i32 - 1) as usize;
     let row = (m.y / g.cell_h).clamp(0, term.grid().screen_lines() as i32 - 1);
+    // Ctrl+click on a link opens it in the browser and beats app mouse
+    // reporting (vim mouse=a maps Ctrl+click to tag-jump). No link under
+    // the cursor -> report normally so the app keeps its native binding;
+    // the local handler then opens the URL.
+    if m.kind == qt::mouse_kind::PRESS
+        && m.button == qt::mouse_button::LEFT
+        && m.mods & qt::modifier::CONTROL != 0
+        && url_at(&term, row, col).is_some()
+    {
+        return false;
+    }
     let base = match m.button {
         qt::mouse_button::LEFT => 0,
         qt::mouse_button::MIDDLE => 1,
