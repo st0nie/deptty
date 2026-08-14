@@ -353,7 +353,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 [[package]]
 name = "dtk"
 version = "0.1.0"
-source = "git+https://github.com/st0nie/dtk-rs#b4978458ec3e7094848eddbb37105bf36d89b642"
+source = "git+https://github.com/st0nie/dtk-rs#5d0b57e755859ee9e559ae8c7621cb8721e07cb0"
 dependencies = [
  "dtk-sys",
 ]
@@ -361,7 +361,7 @@ dependencies = [
 [[package]]
 name = "dtk-sys"
 version = "0.1.0"
-source = "git+https://github.com/st0nie/dtk-rs#b4978458ec3e7094848eddbb37105bf36d89b642"
+source = "git+https://github.com/st0nie/dtk-rs#5d0b57e755859ee9e559ae8c7621cb8721e07cb0"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -439,9 +439,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "futures-io"
-version = "0.3.33"
+version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4577ecaa3c4f96589d473f679a71b596316f6641bc350038b962a5daf0085d7a"
+checksum = "53c0fa8157de1303bfffdaa1cc2a673bfffb60102f76b0ef4441659124373fed"
 
 [[package]]
 name = "getrandom"

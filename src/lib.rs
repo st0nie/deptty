@@ -908,26 +908,32 @@ fn render(
             // draw them pinned to their cell or every glyph after them drifts
             flush_run(p, g, y_off, &mut run, run_line, run_col, run_st, &sc, fonts);
             run_line = -1;
-            p.set_font(match (st.bold, st.italic) {
+            let font = match (st.bold, st.italic) {
                 (true, true) => &fonts.bold_italic,
                 (true, false) => &fonts.bold,
                 (false, true) => &fonts.italic,
                 (false, false) => &fonts.normal,
-            });
+            };
+            p.set_font(font);
             p.set_pen_color(&color_q(fg, &sc));
             let mut buf = [0u8; 4];
-            // fallback glyphs can exceed the cell (box-drawing, CJK): clip or rows overlap
+            let glyph = c.encode_utf8(&mut buf);
+            // Nerd Font PUA icons often fall back to a font with a wider shaped
+            // advance than the cell (14px in a 10px cell): clip to the glyph's real
+            // advance so it renders at natural size overhanging right (alacritty
+            // style), instead of the 1-cell clip cutting the right half off
+            let adv = font.advance(glyph);
             p.save();
             p.set_clip_rect(
                 col as i32 * g.cell_w,
                 y_off + line as i32 * g.cell_h,
-                span * g.cell_w,
+                adv.max(span * g.cell_w),
                 g.cell_h,
             );
             p.draw_text_at(
                 col as i32 * g.cell_w,
                 y_off + line as i32 * g.cell_h + g.ascent,
-                c.encode_utf8(&mut buf),
+                glyph,
             );
             p.restore();
             continue;
