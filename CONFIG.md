@@ -163,7 +163,8 @@ one modifier.
 | `copy`               | copy the current selection to the clipboard         |
 | `paste`              | paste clipboard content into the focused shell      |
 | `new_tab`            | open a new tab (inherits the focused shell's cwd)   |
-| `close_tab`          | close the focused pane's tab                        |
+| `close_tab`          | close the focused pane's tab (default Ctrl+Shift+W)   |
+| `close_workspace`    | close the focused workspace (split); not bound by default, use for one-key split close |
 | `next_tab`           | switch to the next tab                              |
 | `prev_tab`           | switch to the previous tab                          |
 | `split_horizontal`   | split the focused pane with a horizontal divider (top/bottom) |

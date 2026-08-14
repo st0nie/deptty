@@ -73,7 +73,7 @@ theme = "breeze"        # colorscheme; omit for the default deepin palette
 [[key_bindings]]
 key = "T"            # single char or qt key name: "Left", "PageUp", "Escape", ...
 mods = "Ctrl+Shift"  # "+"-joined: Ctrl, Shift, Alt
-action = "new_tab"   # copy | paste | new_tab | close_tab | next_tab | prev_tab
+action = "new_tab"   # copy | paste | new_tab | close_tab | close_workspace | next_tab | prev_tab
                      # split_horizontal | split_vertical | next_pane | prev_pane
                      # focus_pane_up | focus_pane_down | focus_pane_left | focus_pane_right
 ```

@@ -4,7 +4,9 @@
 //! Covers: boot + first shell, resize -> grid follow, marker echo, selection
 //! copy to clipboard, scrollbar sync, second tab, tab width caps, OSC title ->
 //! tab label, SGR attribute flags, vertical + horizontal splits (new shells in
-//! new panes), tab drag reorder (tabMoved), and the pane-exit teardown path.
+//! new panes), tab drag reorder (tabMoved), split-close semantics (close one
+//! split keeps the tab, close-other-workspaces keeps exactly one), and the
+//! pane-exit teardown path.
 //!
 //! Run: QT_QPA_PLATFORM=offscreen cargo test --test app
 use deptty::alacritty_terminal::grid::Dimensions as _;
@@ -58,6 +60,9 @@ fn headless_full_session() {
     let stty = Rc::new(RefCell::new(None::<(Arc<deptty::Shared>, String)>));
     let pane_ids = Rc::new(RefCell::new(None::<(u64, u64, u64, u64)>));
     let closed3 = Rc::new(Cell::new(false));
+    // split-close semantics stages (deepin-terminal): 0 = 3 panes, close one
+    // split and the tab must survive; then close-others leaves exactly one
+    let split_close_checked = Rc::new(Cell::new(false));
     // pane-focus -> tab label regression stages (0..4)
     let title_stage = Rc::new(Cell::new(0i32));
     // DECSCUSR (CSI Ps SP q) stages: 0 inject beam, 1 assert, 2 inject block,
@@ -397,66 +402,133 @@ fn headless_full_session() {
                                 let pw = app.tabs.borrow()[1].pane(p3).pw;
                                 pw.set_focus(); // the closed pane must be the focused one
                                 split3.borrow().as_ref().unwrap().write(b"exit\n");
-                            } else if app.tabs.borrow()[1].panes.len() == 3 {
-                                // deepin-terminal closeSplit: focus falls back to
-                                // the closed pane's split sibling (creation
-                                // order), not the global top-left pane
-                                {
-                                    let ts = app.tabs.borrow();
-                                    let tab = &ts[1];
-                                    let (p0, p1, p2, _) = pane_ids.borrow().expect("pane ids");
-                                    assert_eq!(
-                                        tab.active_pane.get(),
-                                        p2,
-                                        "close-focus must fall back to the split sibling"
-                                    );
-                                    // closing a pane rebalances the same axis
-                                    let cw = tab.container.width();
-                                    for id in [p0, p1, p2] {
-                                        let w = tab.pane(id).rect.get().2;
-                                        assert!(
-                                            (w - cw / 3).abs() <= 2,
-                                            "pane {id} width {w} not rebalanced to thirds"
+                            } else if !split_close_checked.get() {
+                                let n = app.tabs.borrow()[1].panes.len();
+                                if n == 4 {
+                                    // p3's EOF poke not processed yet; wait
+                                } else if n == 3 {
+                                    // deepin-terminal closeSplit: focus falls back to
+                                    // the closed pane's split sibling (creation
+                                    // order), not the global top-left pane
+                                    {
+                                        let ts = app.tabs.borrow();
+                                        let tab = &ts[1];
+                                        let (p0, p1, p2, _) = pane_ids.borrow().expect("pane ids");
+                                        assert_eq!(
+                                            tab.active_pane.get(),
+                                            p2,
+                                            "close-focus must fall back to the split sibling"
                                         );
-                                    }
-                                }
-                                // every alacritty-supported SGR attribute must reach the grid flags
-                                let mut found = None;
-                                for indexed in term.grid().display_iter() {
-                                    if indexed.cell.c == 'B' && indexed.point.line.0 >= 0 {
-                                        // the attr line starts with B at col 0
-                                        if indexed.point.column.0 == 0 {
-                                            found = Some(indexed.point.line.0);
+                                        // closing a pane rebalances the same axis
+                                        let cw = tab.container.width();
+                                        for id in [p0, p1, p2] {
+                                            let w = tab.pane(id).rect.get().2;
+                                            assert!(
+                                                (w - cw / 3).abs() <= 2,
+                                                "pane {id} width {w} not rebalanced to thirds"
+                                            );
                                         }
                                     }
+                                    // every alacritty-supported SGR attribute must reach the grid flags
+                                    let mut found = None;
+                                    for indexed in term.grid().display_iter() {
+                                        if indexed.cell.c == 'B' && indexed.point.line.0 >= 0 {
+                                            // the attr line starts with B at col 0
+                                            if indexed.point.column.0 == 0 {
+                                                found = Some(indexed.point.line.0);
+                                            }
+                                        }
+                                    }
+                                    let l = Line(found.expect("attr line"));
+                                    let flag_at = |col: usize| term.grid()[l][Column(col)].flags;
+                                    assert!(flag_at(0).contains(Flags::BOLD), "SGR1");
+                                    assert!(flag_at(2).contains(Flags::DIM), "SGR2");
+                                    assert!(flag_at(4).contains(Flags::ITALIC), "SGR3");
+                                    assert!(flag_at(6).contains(Flags::UNDERLINE), "SGR4");
+                                    assert!(flag_at(8).contains(Flags::UNDERCURL), "SGR4:3");
+                                    assert!(flag_at(10).contains(Flags::DOTTED_UNDERLINE), "SGR4:4");
+                                    assert!(flag_at(12).contains(Flags::DASHED_UNDERLINE), "SGR4:5");
+                                    assert!(flag_at(14).contains(Flags::STRIKEOUT), "SGR9");
+                                    assert!(flag_at(16).contains(Flags::DOUBLE_UNDERLINE), "SGR21");
+                                    assert!(flag_at(18).contains(Flags::INVERSE), "SGR7");
+                                    assert!(flag_at(20).contains(Flags::HIDDEN), "SGR8");
+                                    drop(term);
+                                    // context menu over a 3-split tab: must build
+                                    // (the close-other-workspaces action is present
+                                    // only when a tab has two or more splits)
+                                    let pane_id = app.tabs.borrow()[1].panes[0].id;
+                                    let pane_w = app.tabs.borrow()[1].panes[0].pw.as_widget();
+                                    deptty::context_menu(&app, pane_id, &pane_w, 10, 10);
+                                    assert!(DApplication::popup_active(), "split menu did not pop");
+                                    // close one split: the tab must survive with the rest
+                                    let (p0, _, _, _) = *pane_ids.borrow().as_ref().unwrap();
+                                    deptty::close_split(&app.tabs, 1, p0);
+                                } else if n == 2 {
+                                    // exactly one pane gone; both tabs alive; the
+                                    // kept pane stayed focused
+                                    {
+                                        let ts = app.tabs.borrow();
+                                        let (_, _, p2, _) = *pane_ids.borrow().as_ref().unwrap();
+                                        assert_eq!(
+                                            ts.len(),
+                                            2,
+                                            "closing a split must not close the tab"
+                                        );
+                                        assert_eq!(
+                                            ts[1].panes.len(),
+                                            2,
+                                            "close_split must remove exactly one pane"
+                                        );
+                                        assert_eq!(
+                                            ts[1].active_pane.get(),
+                                            p2,
+                                            "kept pane must stay focused"
+                                        );
+                                        assert_eq!(ts[0].panes.len(), 1, "other tab untouched");
+                                    }
+                                    // close other workspaces: one click closes every
+                                    // split but the focused one
+                                    let (_, _, p2, _) = *pane_ids.borrow().as_ref().unwrap();
+                                    deptty::close_other_splits(&app.tabs, 1, p2);
+                                } else {
+                                    // close-others left exactly one split; tab lives
+                                    let (_, _, p2, _) = *pane_ids.borrow().as_ref().unwrap();
+                                    {
+                                        let ts = app.tabs.borrow();
+                                        assert_eq!(
+                                            ts.len(),
+                                            2,
+                                            "closing other splits must not close the tab"
+                                        );
+                                        assert_eq!(
+                                            ts[1].panes.len(),
+                                            1,
+                                            "close-others must leave exactly one split"
+                                        );
+                                        assert_eq!(
+                                            ts[1].active_pane.get(),
+                                            p2,
+                                            "kept split stays focused"
+                                        );
+                                    }
+                                    drop(term);
+                                    split_close_checked.set(true);
                                 }
-                                let l = Line(found.expect("attr line"));
-                                let flag_at = |col: usize| term.grid()[l][Column(col)].flags;
-                                assert!(flag_at(0).contains(Flags::BOLD), "SGR1");
-                                assert!(flag_at(2).contains(Flags::DIM), "SGR2");
-                                assert!(flag_at(4).contains(Flags::ITALIC), "SGR3");
-                                assert!(flag_at(6).contains(Flags::UNDERLINE), "SGR4");
-                                assert!(flag_at(8).contains(Flags::UNDERCURL), "SGR4:3");
-                                assert!(flag_at(10).contains(Flags::DOTTED_UNDERLINE), "SGR4:4");
-                                assert!(flag_at(12).contains(Flags::DASHED_UNDERLINE), "SGR4:5");
-                                assert!(flag_at(14).contains(Flags::STRIKEOUT), "SGR9");
-                                assert!(flag_at(16).contains(Flags::DOUBLE_UNDERLINE), "SGR21");
-                                assert!(flag_at(18).contains(Flags::INVERSE), "SGR7");
-                                assert!(flag_at(20).contains(Flags::HIDDEN), "SGR8");
-                                drop(term);
+                            } else {
                                 // tab drag reorder: QTabBar::moveTab emits tabMoved,
                                 // the tabs vec must mirror the new bar order
                                 app.tabbar.move_tab(1, 0);
                                 {
                                     let ts = app.tabs.borrow();
-                                    assert_eq!(ts[0].panes.len(), 3, "split tab not at index 0");
+                                    assert_eq!(ts[0].panes.len(), 1, "split tab not at index 0");
                                     assert_eq!(ts[1].panes.len(), 1, "plain tab not at index 1");
                                 }
                                 // the moved tab stays current; active index tracks it
                                 assert_eq!(app.tabbar.current_index(), 0);
                                 assert_eq!(app.active.get(), 0);
-                                // context menu: builds, localizes, pops; its actions
-                                // are the same fns the keybinding paths exercise above
+                                // context menu over a 1-split tab: builds, localizes,
+                                // pops (no close-other action here); its actions are
+                                // the same fns the keybinding paths exercise above
                                 let pane_id = app.tabs.borrow()[1].panes[0].id;
                                 let pane_w = app.tabs.borrow()[1].panes[0].pw.as_widget();
                                 deptty::context_menu(&app, pane_id, &pane_w, 10, 10);

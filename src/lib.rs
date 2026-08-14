@@ -1380,8 +1380,42 @@ fn active_cwd(tabs: &Rc<RefCell<Vec<Tab>>>, active: &Rc<Cell<usize>>) -> Option<
 
 /// SIGHUP every shell in the tab; each reader thread's EOF poke ('q') removes
 /// its pane, and the last pane removes the tab — one code path for "shell gone"
+/// (the tab bar × button: close the whole workspace with all its splits)
 pub fn close_tab(tabs: &Rc<RefCell<Vec<Tab>>>, i: usize) {
     let pids: Vec<u32> = tabs.borrow()[i].panes.iter().map(|p| p.pid).collect();
+    for pid in pids {
+        if pid != 0 {
+            unsafe { libc::kill(pid as i32, libc::SIGHUP) };
+        }
+    }
+}
+
+/// SIGHUP one split's shell (deepin-terminal "close workspace": the current
+/// terminal closes, the tab survives with its other splits). The reader EOF
+/// poke removes just that pane — same path as a shell that dies on its own,
+/// so the split collapses like any other
+pub fn close_split(tabs: &Rc<RefCell<Vec<Tab>>>, i: usize, pane_id: u64) {
+    let pid = tabs.borrow()[i]
+        .panes
+        .iter()
+        .find(|p| p.id == pane_id)
+        .map(|p| p.pid)
+        .unwrap_or(0);
+    if pid != 0 {
+        unsafe { libc::kill(pid as i32, libc::SIGHUP) };
+    }
+}
+
+/// SIGHUP every split except `keep_id` (deepin-terminal "close other
+/// workspaces": one click closes all splits but the focused one); each EOF
+/// removes its pane, the kept one survives
+pub fn close_other_splits(tabs: &Rc<RefCell<Vec<Tab>>>, i: usize, keep_id: u64) {
+    let pids: Vec<u32> = tabs.borrow()[i]
+        .panes
+        .iter()
+        .filter(|p| p.id != keep_id)
+        .map(|p| p.pid)
+        .collect();
     for pid in pids {
         if pid != 0 {
             unsafe { libc::kill(pid as i32, libc::SIGHUP) };
@@ -1728,7 +1762,25 @@ pub fn context_menu(app: &App, pane_id: u64, at: &QWidget, x: i32, y: i32) {
                     .position(|t| t.panes.iter().any(|p| p.id == pane_id))
             };
             if let Some(ti) = ti {
-                close_tab(&app.tabs, ti);
+                close_split(&app.tabs, ti, pane_id);
+            }
+        });
+    }
+    // deepin-terminal: "close other workspaces" only exists once a tab has
+    // two or more splits; one click closes every split but the focused one
+    let has_splits = app.tabs.borrow().iter().any(|t| {
+        t.panes.iter().any(|p| p.id == pane_id) && t.panes.len() > 1
+    });
+    if has_splits {
+        let app = app.clone();
+        menu.add_action(&t!("menu.close_other_workspaces"), move || {
+            let ti = {
+                let ts = app.tabs.borrow();
+                ts.iter()
+                    .position(|t| t.panes.iter().any(|p| p.id == pane_id))
+            };
+            if let Some(ti) = ti {
+                close_other_splits(&app.tabs, ti, pane_id);
             }
         });
     }
@@ -1904,6 +1956,18 @@ fn make_pane(
                             };
                             if let Some(ti) = ti {
                                 close_tab(&app.tabs, ti);
+                            }
+                        }
+                        CloseWorkspace => {
+                            let ti = {
+                                let ts = app.tabs.borrow();
+                                ts.iter().position(|t| t.panes.iter().any(|p| p.id == id))
+                            };
+                            if let Some(ti) = ti {
+                                // close-workspace action: one split goes (same
+                                // semantics as the context menu item; unbound
+                                // by default, users may bind it in config)
+                                close_split(&app.tabs, ti, id);
                             }
                         }
                         NextTab => switch_tab(&app, app.active.get() + 1),

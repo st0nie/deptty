@@ -206,7 +206,11 @@ pub enum Action {
     Copy,
     Paste,
     NewTab,
+    /// close the whole tab (default-bound to Ctrl+Shift+W)
     CloseTab,
+    /// close the focused workspace (split); config key exists but is not
+    /// bound by default — bind it if you want a one-key split close
+    CloseWorkspace,
     NextTab,
     PrevTab,
     /// horizontal divider, panes top/bottom (konsole Split View Top/Bottom)
