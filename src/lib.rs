@@ -329,6 +329,14 @@ fn key_bytes(k: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
             format!("\x1b[1;{m}{}", fin as char).into_bytes()
         }
     };
+    // SS3 (ESC O <fin>) for F1-F4; CSI 1;<mod><fin> when modified
+    let ss3 = |fin: u8| -> Vec<u8> {
+        if m == 1 {
+            vec![0x1b, b'O', fin]
+        } else {
+            format!("\x1b[1;{m}{}", fin as char).into_bytes()
+        }
+    };
     // CSI <n>;<mod>~ for delete/insert/pageup/pagedown
     let tilde = |plain: &'static [u8], n: i32| -> Vec<u8> {
         if m == 1 {
@@ -372,6 +380,18 @@ fn key_bytes(k: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
         key::HOME => csi(b"\x1b[H", b'H'),
         key::END => csi(b"\x1b[F", b'F'),
         key::BACKTAB => b"\x1b[Z".to_vec(), // Shift+Tab is always CSI Z (xterm)
+        key::F1 => ss3(b'P'),
+        key::F2 => ss3(b'Q'),
+        key::F3 => ss3(b'R'),
+        key::F4 => ss3(b'S'),
+        key::F5 => tilde(b"\x1b[15~", 15),
+        key::F6 => tilde(b"\x1b[17~", 17),
+        key::F7 => tilde(b"\x1b[18~", 18),
+        key::F8 => tilde(b"\x1b[19~", 19),
+        key::F9 => tilde(b"\x1b[20~", 20),
+        key::F10 => tilde(b"\x1b[21~", 21),
+        key::F11 => tilde(b"\x1b[23~", 23),
+        key::F12 => tilde(b"\x1b[24~", 24),
         key::DELETE => tilde(b"\x1b[3~", 3),
         key::PAGE_UP => tilde(b"\x1b[5~", 5),
         key::PAGE_DOWN => tilde(b"\x1b[6~", 6),
@@ -2890,6 +2910,24 @@ mod tests {
         assert_eq!(
             key_bytes(&kev(key::BACKTAB, modifier::SHIFT, ""), false),
             Some(b"\x1b[Z".to_vec())
+        );
+    }
+
+    #[test]
+    fn f_keys() {
+        // F1-F4 plain are SS3, modified go CSI 1;<mod><fin>
+        assert_eq!(key_bytes(&kev(key::F1, 0, ""), false), Some(b"\x1bOP".to_vec()));
+        assert_eq!(key_bytes(&kev(key::F4, 0, ""), false), Some(b"\x1bOS".to_vec()));
+        assert_eq!(
+            key_bytes(&kev(key::F3, modifier::SHIFT | modifier::CONTROL, ""), false),
+            Some(b"\x1b[1;6R".to_vec())
+        );
+        // F5-F12 are tilde codes (xterm numbering: F5=15, F11=23, F12=24)
+        assert_eq!(key_bytes(&kev(key::F5, 0, ""), false), Some(b"\x1b[15~".to_vec()));
+        assert_eq!(key_bytes(&kev(key::F11, 0, ""), false), Some(b"\x1b[23~".to_vec()));
+        assert_eq!(
+            key_bytes(&kev(key::F12, modifier::ALT, ""), false),
+            Some(b"\x1b[24;3~".to_vec())
         );
     }
 
