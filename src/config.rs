@@ -193,8 +193,8 @@ impl Theme {
     pub fn palette16(&self) -> Option<[(u8, u8, u8); 16]> {
         let p = self.palette.as_ref()?;
         let mut out = [(0u8, 0u8, 0u8); 16];
-        for i in 0..16 {
-            out[i] = parse_hex(p.get(i)?)?;
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = parse_hex(p.get(i)?)?;
         }
         Some(out)
     }
@@ -225,6 +225,9 @@ pub enum Action {
     FocusPaneDown,
     FocusPaneLeft,
     FocusPaneRight,
+    /// grow/shrink the focused split's font (gnome-terminal style Ctrl+= / Ctrl+-)
+    IncreaseFontSize,
+    DecreaseFontSize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -263,6 +266,9 @@ fn default_key_bindings() -> Vec<KeyBinding> {
         kb("Down", "Ctrl+Shift", Action::FocusPaneDown),
         kb("Left", "Ctrl+Shift", Action::FocusPaneLeft),
         kb("Right", "Ctrl+Shift", Action::FocusPaneRight),
+        // per-split font zoom (gnome-terminal defaults)
+        kb("=", "Ctrl", Action::IncreaseFontSize),
+        kb("-", "Ctrl", Action::DecreaseFontSize),
     ]
 }
 
@@ -454,6 +460,9 @@ mod tests {
         // belongs to pane focus, so no Alt defaults anywhere
         assert!(has("Left", "Shift", Action::PrevTab));
         assert!(has("Right", "Shift", Action::NextTab));
+        // per-split font zoom defaults
+        assert!(has("=", "Ctrl", Action::IncreaseFontSize));
+        assert!(has("-", "Ctrl", Action::DecreaseFontSize));
         assert!(cfg.key_bindings.iter().all(|b| b.mods != "Alt"));
     }
 }

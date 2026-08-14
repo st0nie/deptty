@@ -404,6 +404,7 @@ fn key_bytes(k: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
 // ---- rendering ----
 
 /// cell pixel geometry
+#[derive(Clone, Copy)]
 pub struct GridGeom {
     pub cell_w: i32,
     pub cell_h: i32,
@@ -420,13 +421,13 @@ struct Fonts {
 }
 
 impl Fonts {
-    fn of(cfg: &config::Config) -> Self {
-        let normal = make_font(cfg);
-        let bold = make_font(cfg);
+    fn of(cfg: &config::Config, size: i32) -> Self {
+        let normal = make_font(cfg, size);
+        let bold = make_font(cfg, size);
         bold.set_bold(true);
-        let italic = make_font(cfg);
+        let italic = make_font(cfg, size);
         italic.set_italic(true);
-        let bold_italic = make_font(cfg);
+        let bold_italic = make_font(cfg, size);
         bold_italic.set_bold(true);
         bold_italic.set_italic(true);
         Self {
@@ -591,16 +592,27 @@ fn sync_scrollbar(term: &AppTerm, sb: ScrollBar, syncing: &std::cell::Cell<bool>
     syncing.set(false);
 }
 
-fn make_font(cfg: &config::Config) -> QFont {
+fn make_font(cfg: &config::Config, size: i32) -> QFont {
     let f = QFont::new();
     match &cfg.font_family {
         Some(family) => f.set_family(family),
         None => f.set_monospace(),
     }
-    f.set_point_size(cfg.font_size);
+    f.set_point_size(size);
     // terminals need integer per-cell advances or shaped runs drift off the grid
     f.force_integer_metrics();
     f
+}
+
+/// cell geometry for a font size; per-split sizes rebuild their own geom
+fn geom_for(cfg: &config::Config, size: i32) -> GridGeom {
+    let font = make_font(cfg, size);
+    let (cell_w, cell_h, ascent) = font.metrics();
+    GridGeom {
+        cell_w,
+        cell_h,
+        ascent,
+    }
 }
 
 fn mouse_point(x: i32, y: i32, g: &GridGeom, term: &AppTerm) -> (Point, Side) {
@@ -867,7 +879,7 @@ fn render(
         y_off,
         w,
         h - y_off,
-        &color_q(Color::Named(NamedColor::Background), &sc),
+        &color_q(Color::Named(NamedColor::Background), sc),
     );
     let mut run = String::new();
     let mut run_line = -1i64;
@@ -901,7 +913,7 @@ fn render(
             let q = if selected {
                 QColor::rgba(o_r, o_g, o_b, 60)
             } else {
-                color_q(bg, &sc)
+                color_q(bg, sc)
             };
             p.fill_rect(
                 col as i32 * g.cell_w,
@@ -937,7 +949,7 @@ fn render(
         if !c.is_ascii() {
             // fallback-font glyphs (powerline, CJK, ...) have advance != cell width:
             // draw them pinned to their cell or every glyph after them drifts
-            flush_run(p, g, y_off, &mut run, run_line, run_col, run_st, &sc, fonts);
+            flush_run(p, g, y_off, &mut run, run_line, run_col, run_st, sc, fonts);
             run_line = -1;
             let font = match (st.bold, st.italic) {
                 (true, true) => &fonts.bold_italic,
@@ -946,7 +958,7 @@ fn render(
                 (false, false) => &fonts.normal,
             };
             p.set_font(font);
-            p.set_pen_color(&color_q(fg, &sc));
+            p.set_pen_color(&color_q(fg, sc));
             let mut buf = [0u8; 4];
             let glyph = c.encode_utf8(&mut buf);
             // Nerd Font PUA icons often fall back to a font with a wider shaped
@@ -970,7 +982,7 @@ fn render(
             continue;
         }
         if line != run_line || col != next_col || Some(st) != run_st {
-            flush_run(p, g, y_off, &mut run, run_line, run_col, run_st, &sc, fonts);
+            flush_run(p, g, y_off, &mut run, run_line, run_col, run_st, sc, fonts);
             run_line = line;
             run_col = col;
             run_st = Some(st);
@@ -978,8 +990,11 @@ fn render(
         run.push(c);
         next_col = col + 1;
     }
-    flush_run(p, g, y_off, &mut run, run_line, run_col, run_st, &sc, fonts);
+    flush_run(p, g, y_off, &mut run, run_line, run_col, run_st, sc, fonts);
 }
+
+/// pane rect (x, y, w, h); aliased so directional focus math stays readable
+pub type Rect = (i32, i32, i32, i32);
 
 /// visible grid as text (test assertions)
 pub fn grid_text(term: &AppTerm) -> String {
@@ -1007,6 +1022,12 @@ pub struct Pane {
     pub sb: ScrollBar,
     /// last layout rect in container coords (divider hit-testing from pane events)
     pub rect: Rc<Cell<(i32, i32, i32, i32)>>,
+    /// per-split font point size (Ctrl+= / Ctrl+- change only the focused split)
+    pub font_size: Cell<i32>,
+    /// cell geometry at this pane's font size; rebuilt on font change
+    pub geom: Rc<Cell<GridGeom>>,
+    /// fonts at this pane's size; private, rebuilt by change_pane_font_size
+    fonts: Rc<RefCell<Fonts>>,
 }
 
 /// split tree; Leaf holds a pane id, panes live in Tab::panes.
@@ -1305,7 +1326,7 @@ fn focus_fallback(node: &Node, id: u64) -> Option<u64> {
 
 /// nearest pane in direction (dx, dy) from `cur`: strictly past the edge on
 /// the dominant axis, shortest center distance (deepin-terminal focusNavigation)
-fn dir_target(rects: &[(u64, (i32, i32, i32, i32))], cur: u64, dx: i32, dy: i32) -> Option<u64> {
+fn dir_target(rects: &[(u64, Rect)], cur: u64, dx: i32, dy: i32) -> Option<u64> {
     let &(_, cr) = rects.iter().find(|(id, _)| *id == cur)?;
     let cc = (cr.0 + cr.2 / 2, cr.1 + cr.3 / 2);
     let mut best: Option<(i64, u64)> = None;
@@ -1840,10 +1861,15 @@ fn make_pane(
     let syncing_sb = Rc::new(Cell::new(false));
     // pane's layout rect in container coords; layout_tree writes, hover reads
     let pane_rect = Rc::new(Cell::new((0i32, 0i32, 0i32, 0i32)));
+    // per-split font: every pane starts at the configured size; Ctrl+=/Ctrl+-
+    // change only the focused pane's fonts+geom, which the closure reads live
+    let font_size = Cell::new(app.cfg.font_size);
+    let geom = Rc::new(Cell::new(geom_for(&app.cfg, app.cfg.font_size)));
+    let fonts = Rc::new(RefCell::new(Fonts::of(&app.cfg, app.cfg.font_size)));
     let pw = PaintWidget::new(Some(container), {
         let app = app.clone();
-        let geom = app.geom.clone();
-        let fonts = Fonts::of(&app.cfg);
+        let geom = geom.clone();
+        let fonts = fonts.clone();
         let shared = shared.clone();
         let pw_slot = pw_slot.clone();
         let sb_slot = sb_slot.clone();
@@ -1866,6 +1892,7 @@ fn make_pane(
             move |x: i32, y: i32, ctrl: bool| {
                 let (row, col, over) = {
                     let term = shared.term.lock();
+                    let geom = geom.get();
                     let col = (x / geom.cell_w).clamp(0, term.grid().columns() as i32 - 1) as usize;
                     let row = (y / geom.cell_h).clamp(0, term.grid().screen_lines() as i32 - 1);
                     (row, col, url_at(&term, row, col).is_some())
@@ -1897,6 +1924,9 @@ fn make_pane(
         let pane_drag = Rc::new(Cell::new(None::<u64>));
         move |ev| match ev {
             PaintWidgetEvent::Paint(p, w, h) => {
+                // per-pane font: read this pane's live cell metrics + fonts
+                let geom = geom.get();
+                let fonts = fonts.borrow();
                 // short lock: snapshot the grid + live cursor shape, then paint
                 // unlocked so the reader thread never waits on QPainter
                 let (snap, cshape) = {
@@ -2023,6 +2053,8 @@ fn make_pane(
                         FocusPaneDown => focus_pane_dir(&app, 0, 1),
                         FocusPaneLeft => focus_pane_dir(&app, -1, 0),
                         FocusPaneRight => focus_pane_dir(&app, 1, 0),
+                        IncreaseFontSize => change_pane_font_size(&app, id, 1),
+                        DecreaseFontSize => change_pane_font_size(&app, id, -1),
                     }
                     return;
                 }
@@ -2043,6 +2075,7 @@ fn make_pane(
                 let _ = shared.writer.lock().unwrap().write_all(commit.as_bytes());
             }
             PaintWidgetEvent::Mouse(m) => {
+                let geom = geom.get(); // this pane's cell metrics (per-split font)
                 if try_report_mouse(&shared, &m, &geom) {
                     return; // app owns the mouse (vim/htop): no local selection
                 }
@@ -2195,6 +2228,7 @@ fn make_pane(
                 }
             }
             PaintWidgetEvent::Wheel { dy, x, y, mods } => {
+                let geom = geom.get(); // this pane's cell metrics (per-split font)
                 {
                     let term = shared.term.lock();
                     if term.mode().intersects(TermMode::MOUSE_MODE) {
@@ -2281,6 +2315,7 @@ fn make_pane(
                 });
             }
             PaintWidgetEvent::Resize { w, h } => {
+                let geom = geom.get(); // this pane's cell metrics (per-split font)
                 if let Some(sb) = *sb_slot.borrow() {
                     sb.as_widget().move_to(w - SB_W, 0);
                     sb.as_widget().resize(SB_W, h);
@@ -2340,6 +2375,9 @@ fn make_pane(
         pw,
         sb,
         rect: pane_rect,
+        font_size,
+        geom,
+        fonts,
     }
 }
 
@@ -2584,6 +2622,43 @@ pub fn focus_pane_dir(app: &App, dx: i32, dy: i32) {
     }
 }
 
+/// grow/shrink the focused split's font by `delta` points (Ctrl+= / Ctrl+-).
+/// Only this pane changes: its fonts+geom are rebuilt, the grid and the PTY
+/// winsize follow the new cell metrics; sibling splits keep their own sizes.
+/// Clamped to [6, 72] so the grid never degenerates.
+pub fn change_pane_font_size(app: &App, pane_id: u64, delta: i32) {
+    let ts = app.tabs.borrow();
+    let ti = match ts
+        .iter()
+        .position(|t| t.panes.iter().any(|p| p.id == pane_id))
+    {
+        Some(ti) => ti,
+        None => return,
+    };
+    let p = ts[ti].pane(pane_id);
+    let new_size = (p.font_size.get() + delta).clamp(6, 72);
+    if new_size == p.font_size.get() {
+        return; // clamped: nothing changed
+    }
+    p.font_size.set(new_size);
+    *p.fonts.borrow_mut() = Fonts::of(&app.cfg, new_size);
+    p.geom.set(geom_for(&app.cfg, new_size));
+    let g = p.geom.get();
+    let (w, h) = (p.pw.as_widget().width(), p.pw.as_widget().height());
+    let cols = (w / g.cell_w).max(1) as usize;
+    let lines = (h / g.cell_h).max(1) as usize;
+    p.shared.term.lock().resize(Size { cols, lines });
+    if let Some(m) = &*p.shared.master.lock().unwrap() {
+        let _ = m.resize(PtySize {
+            rows: lines as u16,
+            cols: cols as u16,
+            pixel_width: w as u16,
+            pixel_height: h as u16,
+        });
+    }
+    p.pw.as_widget().update(); // repaint at the new cell size
+}
+
 pub fn switch_tab(app: &App, i: usize) {
     if app.tabs.borrow().is_empty() {
         return;
@@ -2615,14 +2690,9 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
     let win = DMainWindow::new();
     win.set_window_title("deptty");
 
-    // font + grid geometry (terminal needs a monospace font)
-    let font = make_font(&cfg);
-    let (cell_w, cell_h, ascent) = font.metrics();
-    let geom = Rc::new(GridGeom {
-        cell_w,
-        cell_h,
-        ascent,
-    });
+    // font + grid geometry (terminal needs a monospace font); the default
+    // size for new panes — each split then owns its own size/geom
+    let geom = Rc::new(geom_for(&cfg, cfg.font_size));
 
     let tabs = Rc::new(RefCell::new(Vec::<Tab>::new()));
     let active = Rc::new(Cell::new(0usize));
@@ -2645,7 +2715,7 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
         active,
         tabbar,
         root: PaintWidget::new(None, |_| {}), // placeholder, replaced below
-        geom,
+        geom: geom.clone(),
         win,
         scheme,
     };
@@ -2789,8 +2859,8 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
     // remember window size (deepin-terminal window_width/height, konsole state rc)
     let st = config::State::load();
     win.resize(
-        st.window_width.unwrap_or(80 * cell_w),
-        st.window_height.unwrap_or(24 * cell_h),
+        st.window_width.unwrap_or(80 * geom.cell_w),
+        st.window_height.unwrap_or(24 * geom.cell_h),
     );
 
     let icon = QIcon::from_theme("deepin-terminal");
@@ -2988,8 +3058,8 @@ mod tests {
         let hollow_rects = vec![(0, 0, 10, 2), (0, 18, 10, 2), (0, 2, 2, 16), (8, 2, 2, 16)];
         assert_eq!(solid(HollowBlock), hollow_rects);
         // DECSCUSR/DECTCEM hidden cursor: nothing drawn, even unfocused
-        assert_eq!(solid(Hidden), Vec::<((i32, i32, i32, i32))>::new());
-        assert_eq!(hollow(Hidden), Vec::<((i32, i32, i32, i32))>::new());
+        assert_eq!(solid(Hidden), Vec::<(i32, i32, i32, i32)>::new());
+        assert_eq!(hollow(Hidden), Vec::<(i32, i32, i32, i32)>::new());
         // unfocused pane: hollow block outline, whatever the shape.
         // Left/right strokes are clipped to the band so corners never stack
         // two translucent layers (which painted lighter than the rest)
@@ -3060,6 +3130,18 @@ mod tests {
         // plain arrows still go to the shell
         assert_eq!(match_action(&cfg, key::LEFT, 0), None);
         assert_eq!(match_action(&cfg, key::RIGHT, 0), None);
+        // per-split font zoom (gnome-terminal defaults): Ctrl+= / Ctrl+- only
+        assert_eq!(
+            match_action(&cfg, '=' as i32, modifier::CONTROL),
+            Some(config::Action::IncreaseFontSize)
+        );
+        assert_eq!(
+            match_action(&cfg, '-' as i32, modifier::CONTROL),
+            Some(config::Action::DecreaseFontSize)
+        );
+        // plain = / - still go to the shell
+        assert_eq!(match_action(&cfg, '=' as i32, 0), None);
+        assert_eq!(match_action(&cfg, '-' as i32, 0), None);
     }
 
     #[test]

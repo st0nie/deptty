@@ -82,8 +82,10 @@ Defaults: Ctrl+Shift+C/V copy/paste, Ctrl+Shift+T new tab, Ctrl+Shift+W close
 tab, Shift+Left/Right switch tab (konsole), Ctrl+Shift+( / Ctrl+Shift+)
 split left-right / top-bottom, Ctrl+Tab / Ctrl+Shift+Tab cycle split panes,
 Ctrl+Shift+Up/Down/Left/Right move focus between split panes (konsole
-Focus * Terminal). Same-axis splits share space equally (two splits =
-thirds); closing a pane focuses its split sibling and rebalances the rest.
+Focus * Terminal), and Ctrl+= / Ctrl+- zoom the focused split's font
+(per-split; siblings keep their own size). Same-axis splits share space
+equally (two splits = thirds); closing a pane focuses its split sibling and
+rebalances the rest.
 
 ## Themes
 

@@ -60,7 +60,11 @@ font_family = "JetBrains Mono"
 ### `font_size` — integer, default `12`
 
 Font size in points. Combined with `font_family`, this determines the grid
-cell size and therefore how many columns/rows fit in the window.
+cell size and therefore how many columns/rows fit in the window. The value
+is the **starting size per split**: at runtime, `Ctrl+=` / `Ctrl+-` (or
+your own bindings of `increase_font_size` / `decrease_font_size`) change
+only the focused split's font, and the grid / PTY winsize follow
+immediately. Sizes are clamped to 6–72 pt.
 
 ### `cursor_shape` — string, default `"block"`
 
@@ -175,6 +179,8 @@ one modifier.
 | `focus_pane_down`    | move focus to the pane below                        |
 | `focus_pane_left`    | move focus to the pane to the left                  |
 | `focus_pane_right`   | move focus to the pane to the right                 |
+| `increase_font_size` | grow the focused split's font size (default `Ctrl+=`) |
+| `decrease_font_size` | shrink the focused split's font size (default `Ctrl+-`) |
 
 ### Defaults
 
@@ -197,6 +203,8 @@ deepin-terminal / konsole):
 | `Down`                 | `Ctrl+Shift`   | `focus_pane_down`   |
 | `Left`                 | `Ctrl+Shift`   | `focus_pane_left`   |
 | `Right`                | `Ctrl+Shift`   | `focus_pane_right`  |
+| `=`                    | `Ctrl`         | `increase_font_size`|
+| `-`                    | `Ctrl`         | `decrease_font_size`|
 
 **Rebinding**: entries are matched in order; the first binding whose key +
 modifiers match wins. To rebind, just add your own `[[key_bindings]]` — your

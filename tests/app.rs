@@ -63,6 +63,8 @@ fn headless_full_session() {
     // split-close semantics stages (deepin-terminal): 0 = 3 panes, close one
     // split and the tab must survive; then close-others leaves exactly one
     let split_close_checked = Rc::new(Cell::new(false));
+    // per-split font zoom (Ctrl+= / Ctrl+-) checked on the focused split
+    let font_checked = Rc::new(Cell::new(false));
     // pane-focus -> tab label regression stages (0..4)
     let title_stage = Rc::new(Cell::new(0i32));
     // DECSCUSR (CSI Ps SP q) stages: 0 inject beam, 1 assert, 2 inject block,
@@ -394,6 +396,48 @@ fn headless_full_session() {
                                     _ => unreachable!(),
                                 }
                                 title_stage.set(stage + 1);
+                            } else if !font_checked.get() {
+                                // per-split font zoom: the focused split's size
+                                // changes, sibling splits keep theirs, and the
+                                // grid follows the new cell metrics
+                                font_checked.set(true);
+                                let (p0, p1, p2, _p3) = *pane_ids.borrow().as_ref().unwrap();
+                                assert_eq!(
+                                    tab1_active_pane(),
+                                    Some(p2),
+                                    "font stage expects p2 focused (title stage restored it)"
+                                );
+                                let size = |id: u64| app.tabs.borrow()[1].pane(id).font_size.get();
+                                let (b0, b1, b2) = (size(p0), size(p1), size(p2));
+                                assert_eq!(b0, b1, "siblings start at the same size");
+                                assert_eq!(b2, b0);
+                                // Ctrl+= twice on the focused split
+                                deptty::change_pane_font_size(&app, p2, 1);
+                                deptty::change_pane_font_size(&app, p2, 1);
+                                assert_eq!(size(p2), b2 + 2, "focused split must grow");
+                                assert_eq!(size(p0), b0, "sibling split must keep its size");
+                                assert_eq!(size(p1), b1, "sibling split must keep its size");
+                                // Ctrl+- shrinks it back
+                                deptty::change_pane_font_size(&app, p2, -1);
+                                assert_eq!(size(p2), b2 + 1, "ctrl+- must shrink the split back");
+                                // the grid follows the new cell metrics, not the old ones
+                                let (g, rect) = {
+                                    let ts = app.tabs.borrow();
+                                    let p = ts[1].pane(p2);
+                                    (p.geom.get(), p.rect.get())
+                                };
+                                let cols = app.tabs.borrow()[1]
+                                    .pane(p2)
+                                    .shared
+                                    .term()
+                                    .lock()
+                                    .grid()
+                                    .columns();
+                                assert_eq!(
+                                    cols,
+                                    (rect.2 / g.cell_w).max(1) as usize,
+                                    "grid must follow the font size change"
+                                );
                             } else if !closed3.get() {
                                 // close the bottom-right pane (Ctrl+D path): the
                                 // reader EOF poke tears it down asynchronously

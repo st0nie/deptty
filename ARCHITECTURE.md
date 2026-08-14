@@ -63,13 +63,19 @@ unfocused, solid shape when focused).
 
 Geometry: `QFont::metrics()` gives cell width/height/ascent (`GridGeom`);
 widget pixel size / cell size = grid cols/lines, fed to alacritty's
-`Dimensions` impl and to `pty.resize()` on resize events.
+`Dimensions` impl and to `pty.resize()` on resize events. **Font is
+per-split**: each `Pane` owns its `font_size` + rebuilt `Fonts`/`GridGeom`
+(`make_pane`), so a split can zoom without touching its siblings.
 
 ## Input
 
 - Keys: `key_bytes()` maps `KeyEvent` -> VT escape sequences (app-cursor mode
   respected). Config keybindings are checked first (`KeyBinding::key_code` +
   `mod_mask`); matched bindings run an `Action`, unmatched keys go to the pty.
+- Font zoom: `increase_font_size` / `decrease_font_size` (defaults
+  `Ctrl+=` / `Ctrl+-`) call `change_pane_font_size`, which rebuilds the
+  focused pane's fonts + geom, resizes its grid + PTY winsize, and repaints;
+  other splits are untouched.
 - IME input forwards as UTF-8 bytes.
 - Mouse: if the app enabled mouse reporting (vim/htop), events become SGR
   reports; otherwise drag = selection (`alacritty_terminal::selection`),
