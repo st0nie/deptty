@@ -446,8 +446,14 @@ fn headless_full_session() {
                                     assert!(flag_at(4).contains(Flags::ITALIC), "SGR3");
                                     assert!(flag_at(6).contains(Flags::UNDERLINE), "SGR4");
                                     assert!(flag_at(8).contains(Flags::UNDERCURL), "SGR4:3");
-                                    assert!(flag_at(10).contains(Flags::DOTTED_UNDERLINE), "SGR4:4");
-                                    assert!(flag_at(12).contains(Flags::DASHED_UNDERLINE), "SGR4:5");
+                                    assert!(
+                                        flag_at(10).contains(Flags::DOTTED_UNDERLINE),
+                                        "SGR4:4"
+                                    );
+                                    assert!(
+                                        flag_at(12).contains(Flags::DASHED_UNDERLINE),
+                                        "SGR4:5"
+                                    );
                                     assert!(flag_at(14).contains(Flags::STRIKEOUT), "SGR9");
                                     assert!(flag_at(16).contains(Flags::DOUBLE_UNDERLINE), "SGR21");
                                     assert!(flag_at(18).contains(Flags::INVERSE), "SGR7");

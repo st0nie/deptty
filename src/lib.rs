@@ -1443,6 +1443,21 @@ fn pane_label(title: &std::sync::Mutex<Option<String>>, cfg: &Config) -> String 
         .unwrap_or_else(|| default_title(cfg))
 }
 
+/// window title follows the active tab's label (deepin-terminal %w: the
+/// taskbar shows the current tab's shell title, browser-style). Idempotent;
+/// call after focus/title/tab changes. Safe on an empty bar (pre-first-tab).
+fn update_window_title(app: &App) {
+    if app.tabs.borrow().is_empty() {
+        return;
+    }
+    let label = {
+        let ts = app.tabs.borrow();
+        let tab = &ts[app.active.get()];
+        pane_label(&tab.active().shared.title, &app.cfg)
+    };
+    app.win.set_window_title(&label);
+}
+
 /// shell for a new pane: config shell / $SHELL / bash
 fn shell_cmd(cfg: &Config) -> CommandBuilder {
     let shell = cfg
@@ -1658,6 +1673,8 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
                             }
                         }
                     }
+                    // shell set a title: refresh the taskbar too (%w behavior)
+                    update_window_title(&app);
                 });
             }
             // repaint only if this pane is on screen
@@ -1768,9 +1785,11 @@ pub fn context_menu(app: &App, pane_id: u64, at: &QWidget, x: i32, y: i32) {
     }
     // deepin-terminal: "close other workspaces" only exists once a tab has
     // two or more splits; one click closes every split but the focused one
-    let has_splits = app.tabs.borrow().iter().any(|t| {
-        t.panes.iter().any(|p| p.id == pane_id) && t.panes.len() > 1
-    });
+    let has_splits = app
+        .tabs
+        .borrow()
+        .iter()
+        .any(|t| t.panes.iter().any(|p| p.id == pane_id) && t.panes.len() > 1);
     if has_splits {
         let app = app.clone();
         menu.add_action(&t!("menu.close_other_workspaces"), move || {
@@ -2208,6 +2227,8 @@ fn make_pane(
                 for pw in pws {
                     pw.update();
                 }
+                // taskbar follows the newly focused pane (split focus changes)
+                update_window_title(&app);
             }
             PaintWidgetEvent::Focus(false) => {
                 // clicking the titlebar moves focus there; take it back next turn —
@@ -2680,6 +2701,8 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
                 ts[new].active().pw
             };
             pw.set_focus();
+            // taskbar follows the switched-to tab
+            update_window_title(&app);
         }
     });
     tabbar.connect_signal_i32("tabCloseRequested(int)", {
