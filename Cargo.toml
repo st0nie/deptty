@@ -26,3 +26,7 @@ assets = [
     ["assets/deptty.desktop", "usr/share/applications/", "644"],
     ["themes/*.toml", "usr/share/deptty/themes/", "644"],
 ]
+
+[[bench]]
+name = "perf"
+harness = false

@@ -77,6 +77,14 @@ pub struct Shared {
     title: Arc<Mutex<Option<String>>>,
     /// qtermwidget-style title debounce: only one apply timer in flight
     title_armed: Arc<std::sync::atomic::AtomicBool>,
+    /// reader set on output; a per-pane 10ms repaint timer polls it (no
+    /// per-chunk socket wakeups — `time ls -al` of a big dir was paying a
+    /// syscall + notifier round-trip per ~200B line-buffer flush)
+    dirty: Arc<std::sync::atomic::AtomicBool>,
+    /// µs since process start of the last reader chunk (qtermwidget's
+    /// BULK_TIMEOUT1 restart: burst-end repaint 10ms after the last byte;
+    /// BULK_TIMEOUT2 cap lives in the timer via last_paint)
+    last_data: Arc<std::sync::atomic::AtomicU64>,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
 }
@@ -1544,6 +1552,8 @@ fn spawn_shell(
         term: FairMutex::new(term),
         title: title_slot,
         title_armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        last_data: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         writer: Mutex::new(Box::new(std::io::sink()) as Box<dyn Write + Send>),
         master: Mutex::new(None),
     });
@@ -1580,9 +1590,8 @@ fn spawn_shell(
                             let mut term = shared.term.lock();
                             processor.advance(&mut *term, &buf[..n]);
                         }
-                        if gui_end.write_all(b"x").is_err() {
-                            break;
-                        }
+                        shared.dirty.store(true, std::sync::atomic::Ordering::Release);
+                        shared.last_data.store(mono_us(), std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -1595,7 +1604,21 @@ fn spawn_shell(
     (shared, pid, gui_read)
 }
 
-/// per-pane notifier: repaint on output, remove the pane on shell exit
+/// monotonic µs since process start (shared by reader + GUI timers)
+static MONO_BASE: std::sync::LazyLock<std::time::Instant> =
+    std::sync::LazyLock::new(std::time::Instant::now);
+fn mono_us() -> u64 {
+    MONO_BASE.elapsed().as_micros() as u64
+}
+
+/// per-pane notifier: exit detection over the socketpair; output-driven
+/// repaint + title via a 10ms dirty-flag timer (qtermwidget BULK_TIMEOUT1
+/// burst-end latency; BULK_TIMEOUT2's 40ms stream cap keeps continuous
+/// output at 25fps — enough for animation, cheap on `yes`/`top`/`tail -f`).
+/// The reader no longer pokes the GUI per chunk — a 540KB `ls` dump was
+/// paying a socket write + notifier round-trip per ~200B line-buffer
+/// flush, which piled ~5-10ms of syscall latency and scheduling jitter
+/// onto `time ls`.
 fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>) {
     let notifier = QSocketNotifier::new(gui_read.as_raw_fd());
     notifier.on_activated({
@@ -1610,6 +1633,9 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
                 }
                 exited |= drain[..n].contains(&b'q');
             }
+            if !exited {
+                return; // only 'q' travels this socket now; repaint runs on the timer
+            }
             // locate (tab, pane) by shared identity
             let loc = {
                 let ts = app.tabs.borrow();
@@ -1621,62 +1647,95 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
                 })
             };
             let Some((ti, pane_id)) = loc else { return };
-            if exited {
-                // fd stays "readable" at EOF: stop the notifier or the event
-                // loop re-fires on it forever (100% CPU after the pane closes)
-                notifier.set_enabled(false);
-                let last_pane = app.tabs.borrow()[ti].panes.len() == 1;
-                if last_pane {
-                    // last pane: the whole tab goes (single code path for "shell gone")
-                    // NB: tabbar.remove_tab/set_current_index emit currentChanged, which
-                    // borrows `tabs` — never call them while holding a borrow (reentrancy)
-                    {
-                        let tab = app.tabs.borrow_mut().remove(ti);
-                        tab.container.delete_later();
-                    }
-                    app.tabbar.remove_tab(ti as i32);
-                    if app.tabs.borrow().is_empty() {
-                        DApplication::quit();
-                        return;
-                    }
-                    let next = app.active.get().min(app.tabs.borrow().len() - 1);
-                    app.active.set(next);
-                    app.tabbar.set_current_index(next as i32);
-                    app.tabbar.as_widget().flush_layout();
+            // fd stays "readable" at EOF: stop the notifier or the event
+            // loop re-fires on it forever (100% CPU after the pane closes)
+            notifier.set_enabled(false);
+            let last_pane = app.tabs.borrow()[ti].panes.len() == 1;
+            if last_pane {
+                // last pane: the whole tab goes (single code path for "shell gone")
+                // NB: tabbar.remove_tab/set_current_index emit currentChanged, which
+                // borrows `tabs` — never call them while holding a borrow (reentrancy)
+                {
+                    let tab = app.tabs.borrow_mut().remove(ti);
+                    tab.container.delete_later();
+                }
+                app.tabbar.remove_tab(ti as i32);
+                if app.tabs.borrow().is_empty() {
+                    DApplication::quit();
                     return;
                 }
-                let focus_pw = {
-                    let mut ts = app.tabs.borrow_mut();
-                    let tab = &mut ts[ti];
-                    // deepin-terminal closeSplit (WidgetTreeReverseFindTerm): focus
-                    // the first remaining terminal of the same split group — not
-                    // the global top-left leaf
-                    let fallback = focus_fallback(&tab.tree, pane_id);
-                    let axis = parent_axis(&tab.tree, pane_id);
-                    remove_leaf(&mut tab.tree, pane_id);
-                    if let Some(axis) = axis {
-                        equalize_axis(&mut tab.tree, axis); // closing a third leaves halves
-                    }
-                    if let Some(pos) = tab.panes.iter().position(|p| p.id == pane_id) {
-                        let p = tab.panes.remove(pos);
-                        p.pw.as_widget().delete_later(); // takes the scrollbar child with it
-                    }
-                    let mut focus = None;
-                    if tab.active_pane.get() == pane_id
-                        && let Some(nid) = fallback
-                    {
-                        tab.active_pane.set(nid);
-                        focus = Some(tab.pane(nid).pw);
-                    }
-                    layout_tab(tab);
-                    focus
-                };
-                // set_focus fires Focus events synchronously; they borrow tabs
-                if let Some(pw) = focus_pw {
-                    pw.set_focus();
-                }
+                let next = app.active.get().min(app.tabs.borrow().len() - 1);
+                app.active.set(next);
+                app.tabbar.set_current_index(next as i32);
+                app.tabbar.as_widget().flush_layout();
                 return;
             }
+            let focus_pw = {
+                let mut ts = app.tabs.borrow_mut();
+                let tab = &mut ts[ti];
+                // deepin-terminal closeSplit (WidgetTreeReverseFindTerm): focus
+                // the first remaining terminal of the same split group — not
+                // the global top-left leaf
+                let fallback = focus_fallback(&tab.tree, pane_id);
+                let axis = parent_axis(&tab.tree, pane_id);
+                remove_leaf(&mut tab.tree, pane_id);
+                if let Some(axis) = axis {
+                    equalize_axis(&mut tab.tree, axis); // closing a third leaves halves
+                }
+                if let Some(pos) = tab.panes.iter().position(|p| p.id == pane_id) {
+                    let p = tab.panes.remove(pos);
+                    p.pw.as_widget().delete_later(); // takes the scrollbar child with it
+                }
+                let mut focus = None;
+                if tab.active_pane.get() == pane_id
+                    && let Some(nid) = fallback
+                {
+                    tab.active_pane.set(nid);
+                    focus = Some(tab.pane(nid).pw);
+                }
+                layout_tab(tab);
+                focus
+            };
+            // set_focus fires Focus events synchronously; they borrow tabs
+            if let Some(pw) = focus_pw {
+                pw.set_focus();
+            }
+        }
+    });
+    notifier.leak();
+
+    // repaint + title driver: poll the dirty flag at 10ms (qtermwidget's
+    // BULK_TIMEOUT1 burst-end latency); idle panes do nothing (flag stays
+    // clear), so the cost is one atomic load per tick. Stream cap 40ms
+    // (BULK_TIMEOUT2): continuous output repaints at most 25fps, sparing
+    // CPU on `yes`/`top`/`tail -f` — burst-end latency stays 10ms because
+    // the reader stamps last_data per chunk.
+    let repaint = QTimer::new();
+    repaint.on_timeout({
+        let app = app.clone();
+        let me = me.clone();
+        let mut last_paint = mono_us();
+        move || {
+            let now = mono_us();
+            let dirty = me.dirty.load(std::sync::atomic::Ordering::Acquire);
+            let data_age = now.saturating_sub(me.last_data.load(std::sync::atomic::Ordering::Relaxed));
+            let paint_age = now.saturating_sub(last_paint);
+            // settle (data stopped ≥10ms ago) or stream cap (≥40ms since last paint)
+            if !dirty || (data_age < 10_000 && paint_age < 40_000) {
+                return;
+            }
+            last_paint = now;
+            me.dirty.store(false, std::sync::atomic::Ordering::Release);
+            let loc = {
+                let ts = app.tabs.borrow();
+                ts.iter().enumerate().find_map(|(ti, t)| {
+                    t.panes
+                        .iter()
+                        .find(|p| Arc::ptr_eq(&p.shared, &me))
+                        .map(|p| (ti, p.id))
+                })
+            };
+            let Some((ti, _pane_id)) = loc else { return };
             // OSC title: coalesce like qtermwidget's 20ms title timer — rapid
             // reset->set bursts (prompt redraw after every command) collapse to
             // the latest value, so transient titles never reach the tab
@@ -1728,7 +1787,8 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
             }
         }
     });
-    notifier.leak();
+    repaint.start(10);
+    repaint.leak();
 }
 
 fn copy_selection(shared: &Arc<Shared>) {
