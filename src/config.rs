@@ -21,6 +21,10 @@ pub struct Config {
     /// colorscheme name ("breeze", ...) or path to a theme .toml; None ->
     /// default deepin palette (auto dark/light from the system window color)
     pub theme: Option<String>,
+    /// min interval between screen repaints in ms (kitty repaint_delay);
+    /// lower = more FPS + more CPU, higher = less CPU; pending input always
+    /// repaints immediately, so typing stays snappy even at high values
+    pub repaint_delay: u64,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -42,6 +46,7 @@ impl Default for Config {
             key_bindings: default_key_bindings(),
             cursor_shape: CursorShape::default(),
             theme: None,
+            repaint_delay: 10,
         }
     }
 }

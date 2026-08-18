@@ -77,14 +77,11 @@ pub struct Shared {
     title: Arc<Mutex<Option<String>>>,
     /// qtermwidget-style title debounce: only one apply timer in flight
     title_armed: Arc<std::sync::atomic::AtomicBool>,
-    /// reader set on output; a per-pane 10ms repaint timer polls it (no
-    /// per-chunk socket wakeups — `time ls -al` of a big dir was paying a
-    /// syscall + notifier round-trip per ~200B line-buffer flush)
+    /// reader set on output; a per-pane repaint timer (cfg.repaint_delay)
+    /// polls it — no per-chunk socket wakeups: `time ls -al` of a big dir
+    /// was paying a syscall + notifier round-trip per ~200B line-buffer
+    /// flush, piling ~5-10ms of latency and jitter onto the shell command
     dirty: Arc<std::sync::atomic::AtomicBool>,
-    /// µs since process start of the last reader chunk (qtermwidget's
-    /// BULK_TIMEOUT1 restart: burst-end repaint 10ms after the last byte;
-    /// BULK_TIMEOUT2 cap lives in the timer via last_paint)
-    last_data: Arc<std::sync::atomic::AtomicU64>,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
 }
@@ -1553,7 +1550,6 @@ fn spawn_shell(
         title: title_slot,
         title_armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        last_data: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         writer: Mutex::new(Box::new(std::io::sink()) as Box<dyn Write + Send>),
         master: Mutex::new(None),
     });
@@ -1591,7 +1587,6 @@ fn spawn_shell(
                             processor.advance(&mut *term, &buf[..n]);
                         }
                         shared.dirty.store(true, std::sync::atomic::Ordering::Release);
-                        shared.last_data.store(mono_us(), std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -1602,13 +1597,6 @@ fn spawn_shell(
     *shared.master.lock().unwrap() = Some(pty.master);
     drop(pty.slave); // keep no slave fd: master must see EOF when the shell exits
     (shared, pid, gui_read)
-}
-
-/// monotonic µs since process start (shared by reader + GUI timers)
-static MONO_BASE: std::sync::LazyLock<std::time::Instant> =
-    std::sync::LazyLock::new(std::time::Instant::now);
-fn mono_us() -> u64 {
-    MONO_BASE.elapsed().as_micros() as u64
 }
 
 /// per-pane notifier: exit detection over the socketpair; output-driven
@@ -1704,28 +1692,20 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
     });
     notifier.leak();
 
-    // repaint + title driver: poll the dirty flag at 10ms (qtermwidget's
-    // BULK_TIMEOUT1 burst-end latency); idle panes do nothing (flag stays
-    // clear), so the cost is one atomic load per tick. Stream cap 40ms
-    // (BULK_TIMEOUT2): continuous output repaints at most 25fps, sparing
-    // CPU on `yes`/`top`/`tail -f` — burst-end latency stays 10ms because
-    // the reader stamps last_data per chunk.
+    // repaint + title driver: poll the dirty flag at cfg.repaint_delay ms
+    // (kitty's repaint_delay — min interval between screen updates; no
+    // stream cap, continuous output repaints at this cadence). Idle panes
+    // do nothing (flag stays clear), so the cost is one atomic load per
+    // tick. Pending input repaints immediately (key handler below), so
+    // typing echo never waits for the interval (kitty's input fast-path).
     let repaint = QTimer::new();
     repaint.on_timeout({
         let app = app.clone();
         let me = me.clone();
-        let mut last_paint = mono_us();
         move || {
-            let now = mono_us();
-            let dirty = me.dirty.load(std::sync::atomic::Ordering::Acquire);
-            let data_age = now.saturating_sub(me.last_data.load(std::sync::atomic::Ordering::Relaxed));
-            let paint_age = now.saturating_sub(last_paint);
-            // settle (data stopped ≥10ms ago) or stream cap (≥40ms since last paint)
-            if !dirty || (data_age < 10_000 && paint_age < 40_000) {
+            if !me.dirty.swap(false, std::sync::atomic::Ordering::Acquire) {
                 return;
             }
-            last_paint = now;
-            me.dirty.store(false, std::sync::atomic::Ordering::Release);
             let loc = {
                 let ts = app.tabs.borrow();
                 ts.iter().enumerate().find_map(|(ti, t)| {
@@ -1787,7 +1767,7 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
             }
         }
     });
-    repaint.start(10);
+    repaint.start(app.cfg.repaint_delay.max(1) as i32); // 0 = as fast as possible
     repaint.leak();
 }
 
@@ -2067,6 +2047,13 @@ fn make_pane(
                 update_hover(x, y, k.press);
             }
             PaintWidgetEvent::Key(k) if k.press => {
+                // kitty input fast-path: pending output repaints immediately,
+                // so typing echo never waits a full repaint_delay
+                if shared.dirty.swap(false, std::sync::atomic::Ordering::Acquire)
+                    && let Some(w) = &*pw_slot.borrow()
+                {
+                    w.update();
+                }
                 // configurable bindings first (alacritty-style [[key_binding]])
                 let hit = match_action(&app.cfg, k.key, k.mods);
                 if let Some(action) = hit {

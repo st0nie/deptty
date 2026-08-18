@@ -32,6 +32,8 @@ cursor_shape = "beam"       # "block" | "beam" | "underline", default "block"
 # ---- terminal ----
 shell = "/bin/zsh"          # optional, default: $SHELL, then /bin/bash
 scrollback = 20000          # history lines kept in memory, default 10000
+repaint_delay = 10          # min ms between screen repaints, default 10
+                            # lower = more FPS + more CPU (kitty repaint_delay)
 
 # ---- colors ----
 theme = "breeze"            # optional, default: system dark/light palette
@@ -101,6 +103,17 @@ when the application is not scrolling itself.
 
 ```toml
 scrollback = 50000
+```
+
+### `repaint_delay` — integer ms, default `10`
+
+Minimum interval between screen repaints (kitty's `repaint_delay`).
+Continuous output repaints at this cadence: `10` ≈ 100 FPS, `40` ≈ 25 FPS
+but much less CPU. Pending input always repaints immediately (kitty's
+input fast-path), so typing stays snappy even at high values.
+
+```toml
+repaint_delay = 40
 ```
 
 ### `theme` — string, optional
