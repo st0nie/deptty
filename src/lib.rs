@@ -70,6 +70,17 @@ impl alacritty_terminal::event::EventListener for TitleListener {
 
 type AppTerm = Term<TitleListener>;
 
+/// rows queued for repaint: `(viewport row, left col, right col)` where row 0
+/// is the top of the viewport (alacritty damage iterator convention). The
+/// reader thread appends terminal damage after each advance; GUI-side changes
+/// (scroll, selection, hover, focus) add their own; paint consumes it all and
+/// redraws only those rows. `full` = whole viewport.
+#[derive(Default)]
+pub struct Damage {
+    pub full: bool,
+    pub rows: Vec<(usize, usize, usize)>,
+}
+
 /// shared terminal state; reader thread feeds it, GUI thread renders it
 pub struct Shared {
     term: FairMutex<AppTerm>,
@@ -82,6 +93,12 @@ pub struct Shared {
     /// was paying a syscall + notifier round-trip per ~200B line-buffer
     /// flush, piling ~5-10ms of latency and jitter onto the shell command
     dirty: Arc<std::sync::atomic::AtomicBool>,
+    /// terminal + GUI-side rows waiting to be repainted (see [`Damage`])
+    damage: Arc<Mutex<Damage>>,
+    /// paint consumed a full viewport repaint: the repaint timer skips one
+    /// tick (cooldown) so full renders top out at ~half the tick rate while
+    /// cheap partial renders stay at full rate (scrolling text vs spinner)
+    full_painted: Arc<std::sync::atomic::AtomicBool>,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
 }
@@ -94,6 +111,51 @@ impl Shared {
     /// test hook: write bytes to the shell
     pub fn write(&self, bytes: &[u8]) {
         let _ = self.writer.lock().unwrap().write_all(bytes);
+    }
+    /// queue a full-viewport repaint
+    fn damage_full(&self) {
+        let mut d = self.damage.lock().unwrap();
+        d.full = true;
+        d.rows.clear();
+    }
+    /// queue repaint of viewport rows `[start..=end]` (grid-line coords, so
+    /// add the caller's display offset when mapping from a scrolled view)
+    fn damage_rows(&self, start: usize, end: usize) {
+        if start > end {
+            return;
+        }
+        let mut d = self.damage.lock().unwrap();
+        if d.full {
+            return;
+        }
+        for r in start..=end {
+            d.rows.push((r, 0, usize::MAX));
+        }
+        if d.rows.len() > 64 {
+            d.full = true;
+            d.rows.clear();
+        }
+    }
+    /// reader thread: copy the terminal's own damage into the pending set
+    fn capture_damage(&self, term: &mut AppTerm) {
+        use alacritty_terminal::term::TermDamage;
+        let mut d = self.damage.lock().unwrap();
+        match term.damage() {
+            TermDamage::Full => {
+                d.full = true;
+                d.rows.clear();
+            }
+            TermDamage::Partial(it) => {
+                for b in it {
+                    d.rows.push((b.line, b.left, b.right));
+                }
+                if d.rows.len() > 64 {
+                    d.full = true;
+                    d.rows.clear();
+                }
+            }
+        }
+        term.reset_damage();
     }
 }
 
@@ -819,6 +881,49 @@ fn snapshot_grid(term: &AppTerm) -> GridSnap {
     }
 }
 
+/// like [`snapshot_grid`] but only the rows listed in `rows` (viewport coords,
+/// 0 = top). `snap.cells` then contains only those rows, so the render loop
+/// paints exactly the damaged region.
+fn snapshot_rows(term: &AppTerm, rows: &[(usize, usize, usize)]) -> GridSnap {    let offset = term.grid().display_offset() as i64;
+    let sel = term.selection.as_ref().and_then(|s| s.to_range(term));
+    let cursor = term.grid().cursor.point;
+    let mut cells = Vec::new();
+    for indexed in term.grid().display_iter() {
+        let line = i64::from(indexed.point.line.0) + offset;
+        if line < 0 {
+            continue;
+        }
+        if rows.iter().any(|(r, _, _)| *r as i64 == line) {
+            cells.push(CellSnap {
+                point: indexed.point,
+                line: line as i32,
+                cell: indexed.cell.clone(),
+            });
+        }
+    }
+    GridSnap {
+        cells,
+        cursor,
+        offset,
+        sel,
+    }
+}
+
+/// queue the rows covered by `term.selection` (grid coords → viewport) for
+/// repaint; call with the term lock held, before/after selection changes
+fn damage_selection(shared: &Shared, term: &AppTerm) {
+    let Some(r) = term.selection.as_ref().and_then(|s| s.to_range(term)) else {
+        return;
+    };
+    let off = term.grid().display_offset();
+    let (a, b) = (r.start.line.0 as i64, r.end.line.0 as i64);
+    let max = term.grid().screen_lines() as i64 - 1;
+    let (lo, hi) = (a.min(b).max(0).min(max), b.max(a).max(0).min(max));
+    if lo <= hi {
+        shared.damage_rows(lo as usize + off, hi as usize + off);
+    }
+}
+
 /// text cursor presentation for one paint: `shape` is the terminal's live
 /// DECSCUSR shape (`CSI Ps SP q`, falling back to the configured default),
 /// `focused` = this pane has input focus. Unfocused panes draw a hollow
@@ -876,16 +981,27 @@ fn render(
     y_off: i32,
     cur: Cursor,
     sc: &Scheme,
+    full: bool,
+    rows: &[(usize, usize, usize)],
 ) {
     p.set_font(&fonts.normal);
-    // paint the whole viewport: default-bg cells must match the scheme, not the widget bg
-    p.fill_rect(
-        0,
-        y_off,
-        w,
-        h - y_off,
-        &color_q(Color::Named(NamedColor::Background), sc),
-    );
+    // background: whole viewport on a full repaint; just the damaged row
+    // bands on a partial one (the widget's other rows keep their pixels)
+    if full {
+        // default-bg cells must match the scheme, not the widget bg
+        p.fill_rect(
+            0,
+            y_off,
+            w,
+            h - y_off,
+            &color_q(Color::Named(NamedColor::Background), sc),
+        );
+    } else {
+        let bg = &color_q(Color::Named(NamedColor::Background), sc);
+        for (r, _, _) in rows {
+            p.fill_rect(0, y_off + *r as i32 * g.cell_h, w, g.cell_h, bg);
+        }
+    }
     let mut run = String::new();
     let mut run_line = -1i64;
     let mut run_col = 0usize;
@@ -895,6 +1011,14 @@ fn render(
     let offset = snap.offset;
     let sel = snap.sel.as_ref();
     for cs in &snap.cells {
+        // partial snapshots already contain only damaged rows; keep the
+        // guard for the full case where rows may be non-empty
+        if !full {
+            let line = i64::from(cs.line);
+            if !rows.iter().any(|(r, _, _)| *r as i64 == line) {
+                continue;
+            }
+        }
         let line = i64::from(cs.line);
         let col = cs.point.column.0;
         let cell = &cs.cell;
@@ -1550,6 +1674,8 @@ fn spawn_shell(
         title: title_slot,
         title_armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        damage: Arc::new(Mutex::new(Damage::default())),
+        full_painted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         writer: Mutex::new(Box::new(std::io::sink()) as Box<dyn Write + Send>),
         master: Mutex::new(None),
     });
@@ -1585,6 +1711,9 @@ fn spawn_shell(
                         {
                             let mut term = shared.term.lock();
                             processor.advance(&mut *term, &buf[..n]);
+                            // capture what advance changed while the term lock
+                            // is held: damage rows are painted by the GUI
+                            shared.capture_damage(&mut term);
                         }
                         shared.dirty.store(true, std::sync::atomic::Ordering::Release);
                     }
@@ -1703,6 +1832,12 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
         let app = app.clone();
         let me = me.clone();
         move || {
+            // full-viewport frame just painted: cool down one tick so
+            // scrolling text (which full-damages every line) doesn't burn
+            // the whole budget on 100fps full renders
+            if me.full_painted.swap(false, std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
             if !me.dirty.swap(false, std::sync::atomic::Ordering::Acquire) {
                 return;
             }
@@ -1899,6 +2034,10 @@ fn make_pane(
     let pw_slot = Rc::new(RefCell::new(None::<PaintWidget>));
     let sb_slot = Rc::new(RefCell::new(None::<ScrollBar>));
     let syncing_sb = Rc::new(Cell::new(false));
+    // last (history, display_offset, screen_lines) pushed to the QScrollBar;
+    // the widget churn per paint (set_range/set_value → layout + repaint) is
+    // only worth it when one of those changed
+    let sb_state = Rc::new(Cell::new((0i32, 0i32, 0i32)));
     // pane's layout rect in container coords; layout_tree writes, hover reads
     let pane_rect = Rc::new(Cell::new((0i32, 0i32, 0i32, 0i32)));
     // per-split font: every pane starts at the configured size; Ctrl+=/Ctrl+-
@@ -1930,12 +2069,17 @@ fn make_pane(
             let pw_slot = pw_slot.clone();
             let cur_shape = cur_shape.clone();
             move |x: i32, y: i32, ctrl: bool| {
-                let (row, col, over) = {
+                let (row, col, over, off) = {
                     let term = shared.term.lock();
                     let geom = geom.get();
                     let col = (x / geom.cell_w).clamp(0, term.grid().columns() as i32 - 1) as usize;
                     let row = (y / geom.cell_h).clamp(0, term.grid().screen_lines() as i32 - 1);
-                    (row, col, url_at(&term, row, col).is_some())
+                    (
+                        row,
+                        col,
+                        url_at(&term, row, col).is_some(),
+                        term.grid().display_offset(),
+                    )
                 };
                 // underline on any hover; clickable (pointing hand) only with Ctrl
                 let shape = if over && ctrl {
@@ -1951,6 +2095,9 @@ fn make_pane(
                 }
                 if hover.get() != Some((row, col)) {
                     hover.set(Some((row, col)));
+                    // hover underline is drawn from this row: queue it as damage
+                    // (viewport coords = grid row + display offset)
+                    shared.damage_rows(row as usize + off, row as usize + off);
                     if let Some(w) = &*pw_slot.borrow() {
                         w.update();
                     }
@@ -1967,18 +2114,34 @@ fn make_pane(
                 // per-pane font: read this pane's live cell metrics + fonts
                 let geom = geom.get();
                 let fonts = fonts.borrow();
-                // short lock: snapshot the grid + live cursor shape, then paint
-                // unlocked so the reader thread never waits on QPainter
-                let (snap, cshape) = {
+                // short lock: snapshot the grid + live cursor shape + pending
+                // damage, then paint unlocked so the reader thread never
+                // waits on QPainter. A paint with no queued damage (expose /
+                // resize) repaints the whole viewport.
+                let (snap, rows, full, cshape) = {
                     let term = shared.term.lock();
-                    let s = snapshot_grid(&term);
+                    let mut dmg = shared.damage.lock().unwrap();
+                    let (snap, rows, full) = if dmg.full {
+                        dmg.full = false;
+                        let rows = std::mem::take(&mut dmg.rows);
+                        (snapshot_grid(&term), rows, true)
+                    } else if !dmg.rows.is_empty() {
+                        let rows = std::mem::take(&mut dmg.rows);
+                        (snapshot_rows(&term, &rows), rows, false)
+                    } else {
+                        (snapshot_grid(&term), Vec::new(), true)
+                    };
+                    // full renders are rate-limited by the repaint timer
+                    shared
+                        .full_painted
+                        .store(full, std::sync::atomic::Ordering::Release);
                     // DECTCEM `CSI ? 25 l/h`: mode bit wins over DECSCUSR shape
                     let shape = if term.mode().contains(TermMode::SHOW_CURSOR) {
                         term.cursor_style().shape // DECSCUSR or default
                     } else {
                         CursorShape::Hidden
                     };
-                    (s, shape)
+                    (snap, rows, full, shape)
                 };
                 let focused = {
                     let ts = app.tabs.borrow();
@@ -1990,10 +2153,13 @@ fn make_pane(
                     shape: cshape,
                     focused,
                 };
-                render(&snap, &p, &geom, &fonts, w, h, 0, cur, &app.scheme);
+                render(&snap, &p, &geom, &fonts, w, h, 0, cur, &app.scheme, full, &rows);
                 // hovered link underline: span recomputed from this frame's
-                // snapshot (mouse-over, deepin-terminal style)
-                if let Some((line, col)) = hover.get() {
+                // snapshot (mouse-over, deepin-terminal style); only redraw it
+                // when the hovered row is part of this frame's damage
+                if let Some((line, col)) = hover.get()
+                    && (full || rows.iter().any(|(r, _, _)| *r as i32 == line))
+                {
                     use alacritty_terminal::term::cell::Flags;
                     let mut chars: Vec<char> = Vec::new();
                     for cs in &snap.cells {
@@ -2024,7 +2190,15 @@ fn make_pane(
                 }
                 if let Some(sb) = *sb_slot.borrow() {
                     let term = shared.term.lock();
-                    sync_scrollbar(&term, sb, &syncing_sb);
+                    let st = (
+                        term.grid().history_size() as i32,
+                        term.grid().display_offset() as i32,
+                        term.grid().screen_lines() as i32,
+                    );
+                    if sb_state.get() != st {
+                        sb_state.set(st);
+                        sync_scrollbar(&term, sb, &syncing_sb);
+                    }
                 }
                 // keep the IME candidate window glued to the cursor
                 let cur = snap.cursor;
@@ -2108,13 +2282,26 @@ fn make_pane(
                 let ctrl = k.mods & qt::modifier::CONTROL != 0;
                 if k.key == qt::key::ESCAPE || (!ctrl && !k.text.is_empty()) {
                     // typing clears the selection, like every other terminal
-                    shared.term.lock().selection = None;
+                    let mut term = shared.term.lock();
+                    if term.selection.is_some() {
+                        term.selection = None;
+                        // the cleared rows were painted selected: queue them
+                        drop(term);
+                        shared.damage_full();
+                    }
                 }
                 // typing jumps back to the prompt; modifier-only presses
                 // (Ctrl/Shift for a shortcut) produce no bytes and must not scroll
                 let app_cursor = shared.term.lock().mode().contains(TermMode::APP_CURSOR);
                 if let Some(bytes) = key_bytes(&k, app_cursor) {
-                    shared.term.lock().scroll_display(Scroll::Bottom);
+                    {
+                        let mut term = shared.term.lock();
+                        if term.grid().display_offset() != 0 {
+                            term.scroll_display(Scroll::Bottom);
+                            drop(term);
+                            shared.damage_full(); // viewport jumps to the prompt
+                        }
+                    }
                     let _ = shared.writer.lock().unwrap().write_all(&bytes);
                 }
             }
@@ -2186,6 +2373,7 @@ fn make_pane(
                         };
                         *streak.borrow_mut() = Some((now, pt.line.0, pt.column.0, count));
                         term.selection = Some(Selection::new(ty, pt, side));
+                        damage_selection(&shared, &term);
                         drop(term);
                         if let Some(w) = &*pw_slot.borrow() {
                             w.update();
@@ -2213,6 +2401,7 @@ fn make_pane(
                         *streak.borrow_mut() = Some((now, pt.line.0, pt.column.0, count));
                         term.selection =
                             Some(Selection::new(SelectionType::Semantic, pt, Side::Left));
+                        damage_selection(&shared, &term);
                         drop(term);
                         if let Some(w) = &*pw_slot.borrow() {
                             w.update();
@@ -2225,10 +2414,14 @@ fn make_pane(
                     k if k == qt::mouse_kind::MOVE && selecting.get() => {
                         {
                             let mut term = shared.term.lock();
+                            // old selection region + new: drag can shrink, so
+                            // damage both (the repaint must blank the old tail)
+                            damage_selection(&shared, &term);
                             let (pt, side) = mouse_point(m.x, m.y, &geom, &term);
                             if let Some(sel) = &mut term.selection {
                                 sel.update(pt, side);
                             }
+                            damage_selection(&shared, &term);
                         }
                         if let Some(w) = &*pw_slot.borrow() {
                             w.update();
@@ -2266,6 +2459,8 @@ fn make_pane(
                         let mut term = shared.term.lock();
                         if term.selection.as_ref().is_some_and(Selection::is_empty) {
                             term.selection = None; // bare click: no selection
+                            drop(term);
+                            shared.damage_full();
                             if let Some(w) = &*pw_slot.borrow() {
                                 w.update();
                             }
@@ -2296,7 +2491,10 @@ fn make_pane(
                 }
                 let lines = dy * 3 / 120; // wheel up (dy>0) -> scroll into history
                 if lines != 0 {
+                    // scroll_display marks the term's own damage full, but the
+                    // GUI must queue it: the reader only captures on output
                     shared.term.lock().scroll_display(Scroll::Delta(lines));
+                    shared.damage_full();
                     if let Some(w) = &*pw_slot.borrow() {
                         w.update();
                     }
@@ -2304,7 +2502,7 @@ fn make_pane(
             }
             PaintWidgetEvent::Focus(true) => {
                 // this pane is now its tab's focus target (splits, menu actions)
-                let pws: Vec<PaintWidget> = {
+                let pws: Vec<(PaintWidget, Arc<Shared>)> = {
                     let ts = app.tabs.borrow();
                     ts.iter()
                         .enumerate()
@@ -2320,12 +2518,14 @@ fn make_pane(
                                 app.tabbar.set_tab_text(ti as i32, &label);
                                 app.tabbar.as_widget().flush_layout();
                             }
-                            t.panes.iter().map(|p| p.pw).collect::<Vec<_>>()
+                            t.panes.iter().map(|p| (p.pw, p.shared.clone())).collect::<Vec<_>>()
                         })
                         .unwrap_or_default()
                 };
                 // solid/hollow cursor swaps on focus change: repaint every pane
-                for pw in pws {
+                for (pw, shared) in pws {
+                    // cursor shape is per-pane paint state, not terminal damage
+                    shared.damage_full();
                     pw.update();
                 }
                 // taskbar follows the newly focused pane (split focus changes)
@@ -2406,6 +2606,7 @@ fn make_pane(
             if delta != 0 {
                 term.scroll_display(Scroll::Delta(delta));
                 drop(term);
+                shared.damage_full(); // viewport moved: repaint everything
                 if let Some(w) = &*pw_slot.borrow() {
                     w.update();
                 }
@@ -2695,6 +2896,7 @@ pub fn change_pane_font_size(app: &App, pane_id: u64, delta: i32) {
     let cols = (w / g.cell_w).max(1) as usize;
     let lines = (h / g.cell_h).max(1) as usize;
     p.shared.term.lock().resize(Size { cols, lines });
+    p.shared.damage_full(); // new cell geometry: every row is stale
     if let Some(m) = &*p.shared.master.lock().unwrap() {
         let _ = m.resize(PtySize {
             rows: lines as u16,
