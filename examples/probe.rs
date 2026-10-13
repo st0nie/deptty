@@ -1,7 +1,11 @@
 // probe: real shaped advance vs grid cell width
 fn main() {
-    let app = dtk::DApplication::new("probe");
-    let _ = &app;
+    dtk::DApplication::with("probe", |_app| {
+    run();
+    });
+}
+
+fn run() {
     for family in ["Fira Code", "monospace"] {
         let f = dtk::QFont::new();
         f.set_family(family);

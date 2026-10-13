@@ -498,10 +498,11 @@ fn flush_run(
     p.set_font(font);
     let (mut r, mut g2, mut b) = rgb_of(st.fg, sc);
     if st.dim {
-        // alacritty dims the fg to 2/3 intensity
-        r = r * 2 / 3;
-        g2 = g2 * 2 / 3;
-        b = b * 2 / 3;
+        // alacritty dims the fg to 2/3 intensity; widen — u8*2 overflows
+        // for bright channels (debug builds panic)
+        r = (u16::from(r) * 2 / 3) as u8;
+        g2 = (u16::from(g2) * 2 / 3) as u8;
+        b = (u16::from(b) * 2 / 3) as u8;
     }
     let qc = QColor::rgb(i32::from(r), i32::from(g2), i32::from(b));
     p.set_pen_color(&qc);
@@ -587,7 +588,7 @@ fn work_dir_arg() -> Option<String> {
 
 /// scrollbar <-> scroll state. range [0, history], value = history - display_offset,
 /// so the slider sits at the bottom when viewing the prompt. syncing guards feedback.
-fn sync_scrollbar(term: &AppTerm, sb: ScrollBar, syncing: &std::cell::Cell<bool>) {
+fn sync_scrollbar(term: &AppTerm, sb: &ScrollBar, syncing: &std::cell::Cell<bool>) {
     let hist = term.grid().history_size() as i32;
     let offset = term.grid().display_offset() as i32;
     syncing.set(true);
@@ -595,6 +596,31 @@ fn sync_scrollbar(term: &AppTerm, sb: ScrollBar, syncing: &std::cell::Cell<bool>
     sb.set_page_step(term.grid().screen_lines() as i32);
     sb.set_value(hist - offset);
     syncing.set(false);
+}
+
+/// scrollbar + IME cursor anchor mirror live term state. Only callable from
+/// ordinary event frames — the paint callback borrows native state and the
+/// dtk runtime rejects QObject calls from inside it.
+fn sync_chrome(
+    shared: &Shared,
+    pw: &PaintWidget,
+    sb: &ScrollBar,
+    geom: &GridGeom,
+    syncing: &std::cell::Cell<bool>,
+) {
+    let term = shared.term.lock();
+    sync_scrollbar(&term, sb, syncing);
+    // keep the IME candidate window glued to the cursor
+    let cur = term.grid().cursor.point;
+    let row = cur.line.0 + term.grid().display_offset() as i32;
+    if row >= 0 {
+        pw.set_ime_cursor_rect(
+            cur.column.0 as i32 * geom.cell_w,
+            row * geom.cell_h,
+            geom.cell_w,
+            geom.cell_h,
+        );
+    }
 }
 
 fn make_font(cfg: &config::Config, size: i32) -> QFont {
@@ -1369,14 +1395,26 @@ pub fn match_action(cfg: &Config, key: i32, mods: i32) -> Option<config::Action>
 }
 
 /// splits are ratio-draggable; divider bands are painted by the root widget
-fn layout_tree(tab: &Tab, node: &Node, x: i32, y: i32, w: i32, h: i32) {
+/// collected target geometry for one pane; widget ops are applied borrow-free
+struct PaneLayout {
+    pw: PaintWidget,
+    rect: Rc<Cell<(i32, i32, i32, i32)>>,
+    geo: (i32, i32, i32, i32),
+}
+
+/// pure tree walk — no widget calls. A native call made while holding a
+/// `tabs` borrow can drain a deferred dtk callback that borrows `tabs` again
+/// (reentrancy panic), so layout is split into collect + apply.
+fn collect_layout(tab: &Tab, node: &Node, x: i32, y: i32, w: i32, h: i32, out: &mut Vec<PaneLayout>) {
     match node {
         Node::Empty => {}
         Node::Leaf(id) => {
             let p = tab.pane(*id);
-            p.rect.set((x, y, w, h));
-            p.pw.as_widget().move_to(x, y);
-            p.pw.as_widget().resize(w.max(1), h.max(1));
+            out.push(PaneLayout {
+                pw: p.pw.clone(),
+                rect: p.rect.clone(),
+                geo: (x, y, w, h),
+            });
         }
         Node::Split {
             vertical,
@@ -1386,15 +1424,37 @@ fn layout_tree(tab: &Tab, node: &Node, x: i32, y: i32, w: i32, h: i32) {
             ..
         } => {
             let (ra, rb, _) = split_geometry(*vertical, ratio.get(), x, y, w, h);
-            layout_tree(tab, a, ra.0, ra.1, ra.2, ra.3);
-            layout_tree(tab, b, rb.0, rb.1, rb.2, rb.3);
+            collect_layout(tab, a, ra.0, ra.1, ra.2, ra.3, out);
+            collect_layout(tab, b, rb.0, rb.1, rb.2, rb.3, out);
         }
     }
 }
 
-fn layout_tab(tab: &Tab) {
-    let (w, h) = (tab.container.width(), tab.container.height());
-    layout_tree(tab, &tab.tree, 0, 0, w, h);
+/// relayout tab `ti` without ever holding a `tabs` borrow across a widget
+/// call: resize/move fire the pane's Resize handler synchronously, and dtk
+/// drains deferred signal callbacks on native-call exit — both reenter `tabs`.
+fn relayout_tab(tabs: &Rc<RefCell<Vec<Tab>>>, ti: usize) {
+    let container = tabs.borrow().get(ti).map(|t| t.container.clone());
+    let Some(container) = container else { return };
+    let (w, h) = (container.width(), container.height());
+    let ops = {
+        let ts = tabs.borrow();
+        let mut v = Vec::new();
+        if let Some(tab) = ts.get(ti) {
+            collect_layout(tab, &tab.tree, 0, 0, w, h, &mut v);
+        }
+        v
+    };
+    for PaneLayout {
+        pw,
+        rect,
+        geo: (x, y, w, h),
+    } in ops
+    {
+        rect.set((x, y, w, h));
+        pw.as_widget().move_to(x, y);
+        pw.as_widget().resize(w.max(1), h.max(1));
+    }
 }
 
 /// app state shared by every handler (all Copy/Rc parts; GUI thread only)
@@ -1607,11 +1667,23 @@ fn spawn_shell(
 /// paying a socket write + notifier round-trip per ~200B line-buffer
 /// flush, which piled ~5-10ms of syscall latency and scheduling jitter
 /// onto `time ls`.
-fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>) {
-    let notifier = QSocketNotifier::new(gui_read.as_raw_fd());
+fn make_notifier(
+    gui_read: &'static mut UnixStream,
+    app: &App,
+    me: &Arc<Shared>,
+    parent: &QWidget,
+    syncing: &Rc<Cell<bool>>,
+) {
+    // timer + notifier are parented to the pane widget: their Owned guards may
+    // drop (Qt adoption owns the native lifetime) and the exit path below stops
+    // them — nothing leaks per-pane the way the old .leak() calls did
+    let repaint = QTimer::new(parent);
+    let notifier = QSocketNotifier::new(gui_read.as_raw_fd(), parent);
     notifier.on_activated({
         let app = app.clone();
         let me = me.clone();
+        let notifier = notifier.clone();
+        let repaint = repaint.clone();
         move || {
             let mut drain = [0u8; 4096];
             let mut exited = false;
@@ -1638,6 +1710,7 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
             // fd stays "readable" at EOF: stop the notifier or the event
             // loop re-fires on it forever (100% CPU after the pane closes)
             notifier.set_enabled(false);
+            repaint.stop(); // a dead pane must not keep ticking
             let last_pane = app.tabs.borrow()[ti].panes.len() == 1;
             if last_pane {
                 // last pane: the whole tab goes (single code path for "shell gone")
@@ -1645,7 +1718,10 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
                 // borrows `tabs` — never call them while holding a borrow (reentrancy)
                 {
                     let tab = app.tabs.borrow_mut().remove(ti);
-                    tab.container.delete_later();
+                    // was delete_later: parented widgets belong to their Qt
+                    // parent (guard deletion panics) — hide; the window takes
+                    // it with it at scope cleanup
+                    tab.container.hide();
                 }
                 app.tabbar.remove_tab(ti as i32);
                 if app.tabs.borrow().is_empty() {
@@ -1658,7 +1734,7 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
                 app.tabbar.as_widget().flush_layout();
                 return;
             }
-            let focus_pw = {
+            let (focus_pw, hide_pw) = {
                 let mut ts = app.tabs.borrow_mut();
                 let tab = &mut ts[ti];
                 // deepin-terminal closeSplit (WidgetTreeReverseFindTerm): focus
@@ -1670,27 +1746,34 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
                 if let Some(axis) = axis {
                     equalize_axis(&mut tab.tree, axis); // closing a third leaves halves
                 }
-                if let Some(pos) = tab.panes.iter().position(|p| p.id == pane_id) {
+                let hide = if let Some(pos) = tab.panes.iter().position(|p| p.id == pane_id) {
                     let p = tab.panes.remove(pos);
-                    p.pw.as_widget().delete_later(); // takes the scrollbar child with it
-                }
+                    Some(p.pw.clone())
+                } else {
+                    None
+                };
                 let mut focus = None;
                 if tab.active_pane.get() == pane_id
                     && let Some(nid) = fallback
                 {
                     tab.active_pane.set(nid);
-                    focus = Some(tab.pane(nid).pw);
+                    focus = Some(tab.pane(nid).pw.clone());
                 }
-                layout_tab(tab);
-                focus
-            };
+                (focus, hide)
+            };            // was delete_later (same Qt-ownership reason as above): hide the
+            // dead pane; its scrollbar/timer/notifier children hide with it.
+            // hide + set_focus fire Focus events synchronously; those borrow
+            // `tabs` — never inside the borrow_mut above (reentrancy)
+            if let Some(w) = &hide_pw {
+                w.as_widget().hide();
+            }
+            relayout_tab(&app.tabs, ti);
             // set_focus fires Focus events synchronously; they borrow tabs
             if let Some(pw) = focus_pw {
                 pw.set_focus();
             }
         }
     });
-    notifier.leak();
 
     // repaint + title driver: poll the dirty flag at cfg.repaint_delay ms
     // (kitty's repaint_delay — min interval between screen updates; no
@@ -1698,10 +1781,10 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
     // do nothing (flag stays clear), so the cost is one atomic load per
     // tick. Pending input repaints immediately (key handler below), so
     // typing echo never waits for the interval (kitty's input fast-path).
-    let repaint = QTimer::new();
     repaint.on_timeout({
         let app = app.clone();
         let me = me.clone();
+        let syncing = syncing.clone();
         move || {
             if !me.dirty.swap(false, std::sync::atomic::Ordering::Acquire) {
                 return;
@@ -1731,44 +1814,55 @@ fn make_notifier(gui_read: &'static mut UnixStream, app: &App, me: &Arc<Shared>)
                         .store(false, std::sync::atomic::Ordering::SeqCst);
                     let t = me.title.lock().unwrap().clone();
                     if let Some(t) = t {
-                        let ts = app.tabs.borrow();
-                        if let Some((ti, tab)) = ts
-                            .iter()
-                            .enumerate()
-                            .find(|(_, t)| t.panes.iter().any(|p| Arc::ptr_eq(&p.shared, &me)))
-                        {
-                            // tab label follows the focused pane's title
-                            if tab.panes.iter().any(|p| Arc::ptr_eq(&p.shared, &me))
-                                && tab.active_pane.get()
-                                    == tab
+                        // pure phase: is this pane its tab's focused one?
+                        let hit = {
+                            let ts = app.tabs.borrow();
+                            ts.iter()
+                                .enumerate()
+                                .find(|(_, tb)| tb.panes.iter().any(|p| Arc::ptr_eq(&p.shared, &me)))
+                                .map(|(ti, tab)| {
+                                    let pid = tab
                                         .panes
                                         .iter()
                                         .find(|p| Arc::ptr_eq(&p.shared, &me))
                                         .map(|p| p.id)
-                                        .unwrap_or(0)
-                                && app.tabbar.tab_text(ti as i32) != t
-                            {
-                                app.tabbar.set_tab_text(ti as i32, &t);
-                                app.tabbar.as_widget().flush_layout();
-                            }
+                                        .unwrap_or(0);
+                                    (ti, tab.active_pane.get() == pid)
+                                })
+                        };
+                        // native phase: tabbar calls can drain deferred dtk
+                        // callbacks — never under a `tabs` borrow
+                        if let Some((ti, true)) = hit
+                            && app.tabbar.tab_text(ti as i32) != t
+                        {
+                            app.tabbar.set_tab_text(ti as i32, &t);
+                            app.tabbar.as_widget().flush_layout();
                         }
                     }
                     // shell set a title: refresh the taskbar too (%w behavior)
                     update_window_title(&app);
                 });
             }
-            // repaint only if this pane is on screen
-            let ts = app.tabs.borrow();
-            if ti == app.active.get()
-                && let Some(tab) = ts.get(ti)
-                && let Some(p) = tab.panes.iter().find(|p| Arc::ptr_eq(&p.shared, &me))
-            {
-                p.pw.update();
+            // repaint only if this pane is on screen; clone the handles under
+            // the borrow, make native calls after it drops (dtk drains deferred
+            // callbacks on native-call exit — reentrancy)
+            let target = if ti == app.active.get() {
+                let ts = app.tabs.borrow();
+                ts.get(ti)
+                    .and_then(|tab| tab.panes.iter().find(|p| Arc::ptr_eq(&p.shared, &me)))
+                    .map(|p| (p.pw.clone(), p.sb.clone(), p.geom.clone()))
+            } else {
+                None
+            };
+            if let Some((pw, sb, geom)) = target {
+                // scrollbar + IME anchor follow the live term; the paint
+                // callback borrows native state, so they sync here instead
+                sync_chrome(&me, &pw, &sb, &geom.get(), &syncing);
+                pw.update();
             }
         }
     });
     repaint.start(app.cfg.repaint_delay.max(1) as i32); // 0 = as fast as possible
-    repaint.leak();
 }
 
 fn copy_selection(shared: &Arc<Shared>) {
@@ -1990,7 +2084,7 @@ fn make_pane(
                     shape: cshape,
                     focused,
                 };
-                render(&snap, &p, &geom, &fonts, w, h, 0, cur, &app.scheme);
+                render(&snap, p, &geom, &fonts, w, h, 0, cur, &app.scheme);
                 // hovered link underline: span recomputed from this frame's
                 // snapshot (mouse-over, deepin-terminal style)
                 if let Some((line, col)) = hover.get() {
@@ -2022,23 +2116,9 @@ fn make_pane(
                         );
                     }
                 }
-                if let Some(sb) = *sb_slot.borrow() {
-                    let term = shared.term.lock();
-                    sync_scrollbar(&term, sb, &syncing_sb);
-                }
-                // keep the IME candidate window glued to the cursor
-                let cur = snap.cursor;
-                let row = cur.line.0 + snap.offset as i32;
-                if row >= 0
-                    && let Some(w) = &*pw_slot.borrow()
-                {
-                    w.set_ime_cursor_rect(
-                        cur.column.0 as i32 * geom.cell_w,
-                        row * geom.cell_h,
-                        geom.cell_w,
-                        geom.cell_h,
-                    );
-                }
+                // scrollbar sync + IME anchor moved to sync_chrome: it runs
+                // from the repaint timer / Resize arm — native calls from
+                // inside this paint callback panic under dtk runtime rules
             }
             // Ctrl press/release over a link toggles the clickable cursor even
             // without a mouse move
@@ -2115,6 +2195,7 @@ fn make_pane(
                 let app_cursor = shared.term.lock().mode().contains(TermMode::APP_CURSOR);
                 if let Some(bytes) = key_bytes(&k, app_cursor) {
                     shared.term.lock().scroll_display(Scroll::Bottom);
+                    shared.dirty.store(true, std::sync::atomic::Ordering::Release);
                     let _ = shared.writer.lock().unwrap().write_all(&bytes);
                 }
             }
@@ -2135,7 +2216,7 @@ fn make_pane(
                     k if k == qt::mouse_kind::PRESS && m.button == qt::mouse_button::LEFT => {
                         // divider slack zone: drag the divider instead of selecting
                         let (px, py, _, _) = pane_rect_h.get();
-                        let host = pw_slot.borrow().map(|w| w.as_widget());
+                        let host = pw_slot.borrow().as_ref().map(|w| w.as_widget());
                         if let Some(host) = host
                             && divider_mouse(
                                 &app,
@@ -2297,6 +2378,9 @@ fn make_pane(
                 let lines = dy * 3 / 120; // wheel up (dy>0) -> scroll into history
                 if lines != 0 {
                     shared.term.lock().scroll_display(Scroll::Delta(lines));
+                    // wake the repaint timer: it syncs the scrollbar to the
+                    // new display offset (paint may not make native calls)
+                    shared.dirty.store(true, std::sync::atomic::Ordering::Release);
                     if let Some(w) = &*pw_slot.borrow() {
                         w.update();
                     }
@@ -2304,7 +2388,7 @@ fn make_pane(
             }
             PaintWidgetEvent::Focus(true) => {
                 // this pane is now its tab's focus target (splits, menu actions)
-                let pws: Vec<PaintWidget> = {
+                let found = {
                     let ts = app.tabs.borrow();
                     ts.iter()
                         .enumerate()
@@ -2316,20 +2400,24 @@ fn make_pane(
                             // the default label when it never set one — titles only
                             // arrive on OSC events, not on focus changes
                             let label = pane_label(&shared.title, &app.cfg);
-                            if app.tabbar.tab_text(ti as i32) != label {
-                                app.tabbar.set_tab_text(ti as i32, &label);
-                                app.tabbar.as_widget().flush_layout();
-                            }
-                            t.panes.iter().map(|p| p.pw).collect::<Vec<_>>()
+                            (ti, label, t.panes.iter().map(|p| p.pw.clone()).collect::<Vec<_>>())
                         })
-                        .unwrap_or_default()
                 };
-                // solid/hollow cursor swaps on focus change: repaint every pane
-                for pw in pws {
-                    pw.update();
+                // native calls borrow-free: dtk drains deferred signal callbacks
+                // on native-call exit; a drained callback re-borrowing `tabs`
+                // would panic if the collect-phase borrow were still held
+                if let Some((ti, label, pws)) = found {
+                    if app.tabbar.tab_text(ti as i32) != label {
+                        app.tabbar.set_tab_text(ti as i32, &label);
+                        app.tabbar.as_widget().flush_layout();
+                    }
+                    // solid/hollow cursor swaps on focus change: repaint every pane
+                    for pw in pws {
+                        pw.update();
+                    }
+                    // taskbar follows the newly focused pane (split focus changes)
+                    update_window_title(&app);
                 }
-                // taskbar follows the newly focused pane (split focus changes)
-                update_window_title(&app);
             }
             PaintWidgetEvent::Focus(false) => {
                 // clicking the titlebar moves focus there; take it back next turn —
@@ -2363,7 +2451,7 @@ fn make_pane(
             }
             PaintWidgetEvent::Resize { w, h } => {
                 let geom = geom.get(); // this pane's cell metrics (per-split font)
-                if let Some(sb) = *sb_slot.borrow() {
+                if let Some(sb) = &*sb_slot.borrow() {
                     sb.as_widget().move_to(w - SB_W, 0);
                     sb.as_widget().resize(SB_W, h);
                 }
@@ -2378,11 +2466,16 @@ fn make_pane(
                         pixel_height: h as u16,
                     });
                 }
+                // grid metrics changed: scrollbar range + IME anchor follow
+                // (Resize is an ordinary frame; paint may not do this)
+                if let (Some(pw), Some(sb)) = (&*pw_slot.borrow(), &*sb_slot.borrow()) {
+                    sync_chrome(&shared, pw, sb, &geom, &syncing_sb);
+                }
             }
             _ => {}
         }
     });
-    *pw_slot.borrow_mut() = Some(pw);
+    *pw_slot.borrow_mut() = Some(pw.clone());
     // deepin-terminal look: I-beam over the grid (arrow is the default)
     pw.as_widget().set_cursor(qt::cursor::IBEAM);
 
@@ -2391,7 +2484,7 @@ fn make_pane(
     // child widgets inherit the parent's I-beam; scrollbar wants the arrow
     sb.as_widget().set_cursor(qt::cursor::ARROW);
     sb.as_widget().show();
-    *sb_slot.borrow_mut() = Some(sb);
+    *sb_slot.borrow_mut() = Some(sb.clone());
     sb.on_value_changed({
         let shared = shared.clone();
         let syncing = syncing_sb.clone();
@@ -2413,14 +2506,14 @@ fn make_pane(
         }
     });
 
-    make_notifier(gui_read, app, &shared);
+    make_notifier(gui_read, app, &shared, &pw.as_widget(), &syncing_sb);
 
     Pane {
         id,
         shared,
         pid,
-        pw,
-        sb,
+        pw: pw.clone(),
+        sb: sb.clone(),
         rect: pane_rect,
         font_size,
         geom,
@@ -2445,7 +2538,7 @@ pub fn spawn_tab(app: &App, cwd: Option<String>) {
         let cslot = cslot.clone();
         let drag = Rc::new(Cell::new(None::<u64>));
         move |ev| {
-            let Some(me) = *cslot.borrow() else { return };
+            let Some(me) = cslot.borrow().clone() else { return };
             let mw = me.as_widget();
             if let PaintWidgetEvent::Mouse(m) = ev {
                 if divider_mouse(&app, &drag, &mw, m.kind, m.button, m.x, m.y) {
@@ -2462,7 +2555,7 @@ pub fn spawn_tab(app: &App, cwd: Option<String>) {
             }
         }
     });
-    *cslot.borrow_mut() = Some(container);
+    *cslot.borrow_mut() = Some(container.clone());
     // PaintWidget defaults to StrongFocus; the container must never eat keys
     container.set_focus_policy(qt::focus::NO_FOCUS);
     let container = container.as_widget();
@@ -2490,9 +2583,11 @@ pub fn spawn_tab(app: &App, cwd: Option<String>) {
 
 /// divider color: DPalette::Highlight, same as deepin-terminal's split line
 /// (their termwidgetpage.cpp setSplitStyle); ours is just a bit thicker
-fn divider_color() -> QColor {
-    let (r, g, b) = DApplication::palette_highlight_rgb();
-    QColor::rgb(i32::from(r), i32::from(g), i32::from(b))
+/// divider band color: palette highlight, resolved once at boot — the paint
+/// callback may not query the palette (dtk runtime borrow rules), so the root
+/// handler rebuilds the QColor from captured channels
+fn divider_rgb() -> (u8, u8, u8) {
+    DApplication::palette_highlight_rgb()
 }
 
 /// divider under (x, y) on the active tab: (id, vertical) for cursor/drag
@@ -2515,19 +2610,27 @@ fn divider_at(app: &App, x: i32, y: i32) -> Option<(u64, bool)> {
 
 /// drag divider `id` on the active tab to the mouse position
 fn divider_drag(app: &App, id: u64, x: i32, y: i32) {
-    let ts = app.tabs.borrow();
-    let tab = &ts[app.active.get()];
-    let (w, h) = (tab.container.width(), tab.container.height());
-    let Some((ratio, vertical, (sx, sy, sw, sh))) = find_divider(&tab.tree, id, 0, 0, w, h) else {
-        return;
-    };
-    let r = if vertical {
-        (x - sx) as f64 / (sw - DIV).max(1) as f64
-    } else {
-        (y - sy) as f64 / (sh - DIV).max(1) as f64
-    };
-    ratio.set(r.clamp(0.05, 0.95));
-    layout_tab(tab);
+    let ti = app.active.get();
+    let container = app.tabs.borrow().get(ti).map(|t| t.container.clone());
+    let Some(container) = container else { return };
+    // native size read borrow-free (dtk drains deferred callbacks on exit)
+    let (w, h) = (container.width(), container.height());
+    {
+        let ts = app.tabs.borrow();
+        let Some(tab) = ts.get(ti) else { return };
+        let Some((ratio, vertical, (sx, sy, sw, sh))) = find_divider(&tab.tree, id, 0, 0, w, h)
+        else {
+            return;
+        };
+        let r = if vertical {
+            (x - sx) as f64 / (sw - DIV).max(1) as f64
+        } else {
+            (y - sy) as f64 / (sh - DIV).max(1) as f64
+        };
+        ratio.set(r.clamp(0.05, 0.95));
+    }
+    // widget moves/resizes reenter `tabs` — apply with no borrow held
+    relayout_tab(&app.tabs, ti);
 }
 
 /// divider drag mouse handling shared by pane widgets (slack zone) and the tab
@@ -2567,8 +2670,15 @@ fn divider_mouse(
         drag.set(None);
         w.set_cursor(qt::cursor::ARROW);
         // container/pane grabbed the focus on press; give the keys back
-        let ts = app.tabs.borrow();
-        ts[app.active.get()].active().pw.set_focus();
+        // (set_focus fires Focus events synchronously — borrow-free)
+        let pw = app
+            .tabs
+            .borrow()
+            .get(app.active.get())
+            .map(|t| t.active().pw.clone());
+        if let Some(pw) = pw {
+            pw.set_focus();
+        }
         return true;
     }
     false
@@ -2601,7 +2711,7 @@ pub fn split_pane(app: &App, pane_id: u64, vertical: bool) -> Option<Arc<Shared>
     let new_id = next_pane_id();
     // phase 2: widget creation fires events (focus/resize) that borrow tabs
     // themselves — never hold a tabs borrow across it
-    let container = app.tabs.borrow()[ti].container;
+    let container = app.tabs.borrow()[ti].container.clone();
     let pane = make_pane(app, &container, new_id, shared.clone(), pid, gui_read);
     {
         let mut ts = app.tabs.borrow_mut();
@@ -2621,9 +2731,11 @@ pub fn split_pane(app: &App, pane_id: u64, vertical: bool) -> Option<Arc<Shared>
         tab.active_pane.set(new_id);
         // deepin-terminal: N same-axis splits share the space equally (thirds, ...)
         equalize_axis(&mut tab.tree, vertical);
-        layout_tab(tab);
     }
-    let pw = app.tabs.borrow()[ti].pane(new_id).pw;
+    // layout makes widget calls which can drain deferred dtk callbacks that
+    // reenter `tabs` — always borrow-free
+    relayout_tab(&app.tabs, ti);
+    let pw = app.tabs.borrow()[ti].pane(new_id).pw.clone();
     pw.as_widget().show();
     pw.set_focus();
     Some(shared)
@@ -2644,7 +2756,7 @@ pub fn cycle_pane(app: &App, step: i32) {
             .position(|i| *i == tab.active_pane.get())
             .unwrap_or(0);
         let next = ids[(cur as i32 + step).rem_euclid(ids.len() as i32) as usize];
-        tab.pane(next).pw
+        tab.pane(next).pw.clone()
     };
     // set_focus fires Focus events synchronously; they borrow tabs (reentrancy)
     pw.set_focus();
@@ -2662,7 +2774,7 @@ pub fn focus_pane_dir(app: &App, dx: i32, dy: i32) {
             .iter()
             .filter_map(|id| rect_of(&tab.tree, *id, 0, 0, w, h).map(|r| (*id, r)))
             .collect();
-        dir_target(&rects, tab.active_pane.get(), dx, dy).map(|id| tab.pane(id).pw)
+        dir_target(&rects, tab.active_pane.get(), dx, dy).map(|id| tab.pane(id).pw.clone())
     };
     if let Some(pw) = pw {
         pw.set_focus();
@@ -2674,28 +2786,39 @@ pub fn focus_pane_dir(app: &App, dx: i32, dy: i32) {
 /// winsize follow the new cell metrics; sibling splits keep their own sizes.
 /// Clamped to [6, 72] so the grid never degenerates.
 pub fn change_pane_font_size(app: &App, pane_id: u64, delta: i32) {
-    let ts = app.tabs.borrow();
-    let ti = match ts
-        .iter()
-        .position(|t| t.panes.iter().any(|p| p.id == pane_id))
-    {
-        Some(ti) => ti,
-        None => return,
+    // phase 1 under the borrow: validate + pure state only
+    let (new_size, pw, shared, geom, fonts) = {
+        let ts = app.tabs.borrow();
+        let Some(p) = ts
+            .iter()
+            .flat_map(|t| t.panes.iter())
+            .find(|p| p.id == pane_id)
+        else {
+            return;
+        };
+        let new_size = (p.font_size.get() + delta).clamp(6, 72);
+        if new_size == p.font_size.get() {
+            return; // clamped: nothing changed
+        }
+        p.font_size.set(new_size);
+        (
+            new_size,
+            p.pw.clone(),
+            p.shared.clone(),
+            p.geom.clone(),
+            p.fonts.clone(),
+        )
     };
-    let p = ts[ti].pane(pane_id);
-    let new_size = (p.font_size.get() + delta).clamp(6, 72);
-    if new_size == p.font_size.get() {
-        return; // clamped: nothing changed
-    }
-    p.font_size.set(new_size);
-    *p.fonts.borrow_mut() = Fonts::of(&app.cfg, new_size);
-    p.geom.set(geom_for(&app.cfg, new_size));
-    let g = p.geom.get();
-    let (w, h) = (p.pw.as_widget().width(), p.pw.as_widget().height());
+    // phase 2 borrow-free: font metrics + widget calls are native (dtk drains
+    // deferred signal callbacks on native-call exit — reentrancy)
+    *fonts.borrow_mut() = Fonts::of(&app.cfg, new_size);
+    geom.set(geom_for(&app.cfg, new_size));
+    let g = geom.get();
+    let (w, h) = (pw.as_widget().width(), pw.as_widget().height());
     let cols = (w / g.cell_w).max(1) as usize;
     let lines = (h / g.cell_h).max(1) as usize;
-    p.shared.term.lock().resize(Size { cols, lines });
-    if let Some(m) = &*p.shared.master.lock().unwrap() {
+    shared.term.lock().resize(Size { cols, lines });
+    if let Some(m) = &*shared.master.lock().unwrap() {
         let _ = m.resize(PtySize {
             rows: lines as u16,
             cols: cols as u16,
@@ -2703,7 +2826,7 @@ pub fn change_pane_font_size(app: &App, pane_id: u64, delta: i32) {
             pixel_height: h as u16,
         });
     }
-    p.pw.as_widget().update(); // repaint at the new cell size
+    pw.as_widget().update(); // repaint at the new cell size
 }
 
 pub fn switch_tab(app: &App, i: usize) {
@@ -2727,11 +2850,10 @@ fn detect_locale() -> &'static str {
     }
 }
 
-/// build the whole app: window, tabbar, first shell. Returns the application
-/// object (for exec) and the shared app state (handlers, tests).
-pub fn boot(cfg: Config) -> (DApplication, App) {
+/// build the whole app: window, tabbar, first shell. Runs inside the
+/// `DApplication::with` scope; returns the shared app state (handlers, tests).
+pub fn boot(cfg: Config, dapp: &DApplication) -> App {
     rust_i18n::set_locale(detect_locale());
-    let dapp = DApplication::new("deptty");
     DApplication::set_application_display_name("deptty");
     dapp.load_translator(); // DTK titlebar menu (about/theme) follows the locale
     let win = DMainWindow::new();
@@ -2756,42 +2878,36 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
     }
     let scheme = scheme_for(theme.as_ref());
 
-    let app = App {
-        cfg: cfg.clone(),
-        tabs,
-        active,
-        tabbar,
-        root: PaintWidget::new(None, |_| {}), // placeholder, replaced below
-        geom: geom.clone(),
-        win,
-        scheme,
-    };
-
-    // root widget: covers the window; its Resize drives every tab's layout.
-    // Pane widgets sit on top; the gaps between them are the split dividers,
-    // which the root paints and hit-tests for drag-resize.
     // root widget: covers the window; its Resize drives every tab's layout.
     // Tab containers sit on top; root paint is the divider color showing
-    // through the bands between panes.
+    // through the bands between panes. Captures tabs+win directly — with
+    // Owned constructors a placeholder root in App can no longer be copied out.
+    let divider = divider_rgb();
     let root = PaintWidget::new(None, {
-        let app = app.clone();
+        let tabs = tabs.clone();
+        let win = win.clone();
         move |ev| {
             match ev {
                 PaintWidgetEvent::Paint(p, w, h) => {
                     // tab containers cover everything but the divider bands
-                    p.fill_rect(0, 0, w, h, &divider_color());
+                    let (r, g, b) = divider;
+                    p.fill_rect(0, 0, w, h, &QColor::rgb(i32::from(r), i32::from(g), i32::from(b)));
                 }
                 PaintWidgetEvent::Resize { w, h } => {
                     // ponytail: one tiny state.toml write per resize frame, no debounce;
                     // add a QTimer debounce if disk churn ever matters
                     config::State {
-                        window_width: Some(app.win.width()),
-                        window_height: Some(app.win.height()),
+                        window_width: Some(win.width()),
+                        window_height: Some(win.height()),
                     }
                     .save();
-                    for tab in app.tabs.borrow().iter() {
-                        tab.container.resize(w, h);
-                        layout_tab(tab);
+                    // widget calls reenter `tabs` (dtk drains deferred
+                    // callbacks on native-call exit) — clone handles first
+                    let containers: Vec<QWidget> =
+                        tabs.borrow().iter().map(|t| t.container.clone()).collect();
+                    for (ti, c) in containers.iter().enumerate() {
+                        c.resize(w, h);
+                        relayout_tab(&tabs, ti);
                     }
                 }
                 _ => {}
@@ -2799,7 +2915,16 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
         }
     });
 
-    let app = App { root, ..app };
+    let app = App {
+        cfg: cfg.clone(),
+        tabs,
+        active,
+        tabbar: tabbar.clone(),
+        root: root.clone(),
+        geom: geom.clone(),
+        win: win.clone(),
+        scheme,
+    };
 
     // DTK tab bar, embedded in the window titlebar (deepin-terminal style)
     tabbar.set_tabs_closable(true);
@@ -2819,23 +2944,32 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
             // don't trust `active` as the old index: during a tab drag Qt may
             // deliver currentChanged before tabMoved reorders the vec. Just
             // re-align visibility with the bar's current index, every time.
-            {
+            // collect handles under the borrow; widget calls reenter `tabs`
+            // (dtk drains deferred callbacks on native-call exit) — apply after
+            let (hide, show) = {
                 let ts = app.tabs.borrow();
-                for (j, t) in ts.iter().enumerate() {
-                    if j != new {
-                        t.container.hide();
-                    }
-                }
-                let tab = &ts[new];
-                tab.container.show();
-                // hidden containers miss resize events; force the layout now
-                tab.container.resize(app.root.width(), app.root.height());
-                layout_tab(tab);
+                (
+                    ts.iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != new)
+                        .map(|(_, t)| t.container.clone())
+                        .collect::<Vec<_>>(),
+                    ts.get(new).map(|t| t.container.clone()),
+                )
+            };
+            for c in &hide {
+                c.hide();
             }
+            if let Some(c) = &show {
+                c.show();
+                // hidden containers miss resize events; force the layout now
+                c.resize(app.root.width(), app.root.height());
+            }
+            relayout_tab(&app.tabs, new);
             app.active.set(new);
             let pw = {
                 let ts = app.tabs.borrow();
-                ts[new].active().pw
+                ts[new].active().pw.clone()
             };
             pw.set_focus();
             // taskbar follows the switched-to tab
@@ -2877,21 +3011,30 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
             }
             // currentChanged may have fired pre-reorder with a stale index;
             // re-align container visibility with the post-move order
-            let pw = {
+            let cur = app.active.get();
+            let (hide, show, pw) = {
                 let ts = app.tabs.borrow();
-                let cur = app.active.get();
-                for (j, t) in ts.iter().enumerate() {
-                    if j != cur {
-                        t.container.hide();
-                    }
-                }
-                let tab = &ts[cur];
-                tab.container.show();
-                tab.container.resize(app.root.width(), app.root.height());
-                layout_tab(tab);
-                tab.active().pw
+                (
+                    ts.iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != cur)
+                        .map(|(_, t)| t.container.clone())
+                        .collect::<Vec<_>>(),
+                    ts.get(cur).map(|t| t.container.clone()),
+                    ts.get(cur).map(|t| t.active().pw.clone()),
+                )
             };
-            pw.set_focus();
+            for c in &hide {
+                c.hide();
+            }
+            if let Some(c) = &show {
+                c.show();
+                c.resize(app.root.width(), app.root.height());
+            }
+            relayout_tab(&app.tabs, cur);
+            if let Some(pw) = pw {
+                pw.set_focus();
+            }
         }
     });
     tabbar.connect_signal("tabAddRequested()", {
@@ -2927,16 +3070,25 @@ pub fn boot(cfg: Config) -> (DApplication, App) {
             .map(|p| p.to_string_lossy().into_owned())
     });
     spawn_tab(&app, cwd);
-    root.leak();
 
-    (dapp, app)
+    // Owned guards: dropping one for a never-parented QObject queues a
+    // delete_later. win is top-level; tabbar/root were adopted by the window.
+    // The scoped runtime's cleanup registry destroys all three at scope exit,
+    // so retire the guards instead (the pre-Owned code leaked them).
+    std::mem::forget(win);
+    std::mem::forget(tabbar);
+    std::mem::forget(root);
+
+    app
 }
 
-/// entry point: config, app, event loop
+/// entry point: config, app scope, event loop
 pub fn main_run() -> i32 {
     let cfg = Config::load();
-    let (dapp, _app) = boot(cfg);
-    dapp.exec()
+    DApplication::with("deptty", |dapp| {
+        let _app = boot(cfg, dapp);
+        dapp.exec()
+    })
 }
 
 #[cfg(test)]

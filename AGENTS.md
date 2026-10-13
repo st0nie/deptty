@@ -32,8 +32,17 @@ cargo test                                         # unit + headless integration
 The integration test (`tests/app.rs`) boots the real app offscreen, spawns real
 shells, asserts grid content, splits, tab reorder, and the exit path. Run it
 after touching render/input/pty/pane code. Never hold a `tabs` borrow across
-widget calls that fire events synchronously (set_focus/show/resize) — the event
-handlers borrow `tabs` too and a borrow_mut will panic (reentrancy).
+ANY dtk call: dtk drains deferred signal callbacks on native-call exit
+(`NativeCall::drop` -> `drain_pending`), so even a getter like
+`tabbar.tab_text()` can synchronously run a menu action that borrows `tabs`
+(reentrancy panic). Collect handles/data under the borrow, drop it, then make
+widget calls. `set_focus`/`show`/`resize` additionally fire events
+synchronously into our own handlers. Same for paint: a PaintWidget paint
+callback borrows native state — no widget/Qt calls inside it (scrollback/IME
+sync lives in the repaint timer + Resize arm via `sync_chrome`). Widgets
+parented at construction are Qt-owned: `delete_later()` on them panics (no
+deletion authority) — hide dead panes/tabs instead; the scoped runtime
+cleanup destroys them at exit.
 
 ## Hard rules
 

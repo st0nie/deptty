@@ -8,6 +8,9 @@
 //! split keeps the tab, close-other-workspaces keeps exactly one), and the
 //! pane-exit teardown path.
 //!
+//! Runs as a plain binary (harness = false): dtk requires the QApplication on
+//! the process main thread, which libtest's worker threads cannot provide.
+//!
 //! Run: QT_QPA_PLATFORM=offscreen cargo test --test app
 use deptty::alacritty_terminal::grid::Dimensions as _;
 use deptty::alacritty_terminal::index::{Column, Line, Point, Side};
@@ -21,8 +24,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-#[test]
-fn headless_full_session() {
+fn main() {
     // SAFETY: single test in this process, set before any thread/Qt init.
     // deepin sessions export QT_QPA_PLATFORM=dxcb;xcb — override unconditionally,
     // the test must always be headless
@@ -39,7 +41,8 @@ fn headless_full_session() {
         theme: Some("breeze".into()),    // colorscheme must apply end-to-end
         ..Default::default()
     };
-    let (dapp, app) = deptty::boot(cfg);
+    DApplication::with("deptty", move |dapp| {
+    let app = deptty::boot(cfg, dapp);
     let geom = app.geom.clone();
     // breeze resolved from the embedded default (no user/system theme dirs in
     // the test env): KDE Breeze #232627 bg / #fcfcfc fg
@@ -175,7 +178,7 @@ fn headless_full_session() {
                     Clipboard::set_text(&copied);
                     assert!(Clipboard::text().contains("DTKTERM_SMOKE_OK"));
                     // scrollbar synced to the live view: at the prompt == slider at bottom
-                    let sb = app.tabs.borrow()[0].panes[0].sb;
+                    let sb = app.tabs.borrow()[0].panes[0].sb.clone();
                     assert_eq!(sb.value(), sb.maximum(), "scrollbar not at bottom");
                     drop(term);
                     if !spawned2.replace(true) {
@@ -443,7 +446,7 @@ fn headless_full_session() {
                                 // reader EOF poke tears it down asynchronously
                                 closed3.set(true);
                                 let (_, _, _, p3) = pane_ids.borrow().expect("pane ids");
-                                let pw = app.tabs.borrow()[1].pane(p3).pw;
+                                let pw = app.tabs.borrow()[1].pane(p3).pw.clone();
                                 pw.set_focus(); // the closed pane must be the focused one
                                 split3.borrow().as_ref().unwrap().write(b"exit\n");
                             } else if !split_close_checked.get() {
@@ -617,5 +620,6 @@ fn headless_full_session() {
         done.get(),
         "session never completed (event loop exited early?)"
     );
+    });
     let _ = std::fs::remove_dir_all(&tmp);
 }

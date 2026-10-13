@@ -30,3 +30,9 @@ assets = [
 [[bench]]
 name = "perf"
 harness = false
+
+# plain binary, not libtest: dtk requires the QApplication on the process main
+# thread, but the libtest harness runs each #[test] on a worker thread
+[[test]]
+name = "app"
+harness = false

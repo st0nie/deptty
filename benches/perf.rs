@@ -121,7 +121,8 @@ fn drain_timing() {
         shell: Some("/bin/bash".into()),
         ..Default::default()
     };
-    let (dapp, app) = deptty::boot(cfg);
+    DApplication::with("deptty", move |dapp| {
+    let app = deptty::boot(cfg, dapp);
     let n_runs = 30;
     let results = Rc::new(RefCell::new(Vec::new()));
     let done = Rc::new(Cell::new(false));
@@ -245,5 +246,6 @@ fn drain_timing() {
     });
     dapp.exec();
     assert!(done.get(), "drain: session never completed");
+    });
     let _ = std::fs::remove_dir_all(&tmp);
 }
