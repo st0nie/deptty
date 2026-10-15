@@ -1,2 +1,9 @@
 target/
 .codegraph/
+/.pi
+
+# realmem: share project memories (.pi/realmem) through git
+!/.pi/
+/.pi/*
+!/.pi/realmem/
+!/.pi/realmem/**
