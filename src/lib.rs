@@ -282,7 +282,7 @@ fn rgb_of(c: Color, sc: &Scheme) -> (u8, u8, u8) {
 
 fn color_q(c: Color, sc: &Scheme) -> QColor {
     let (r, g, b) = rgb_of(c, sc);
-    QColor::rgb(i32::from(r), i32::from(g), i32::from(b))
+    QColor::from_rgb(i32::from(r), i32::from(g), i32::from(b))
 }
 
 fn should_paint_cell_bg(
@@ -504,7 +504,7 @@ fn flush_run(
         g2 = (u16::from(g2) * 2 / 3) as u8;
         b = (u16::from(b) * 2 / 3) as u8;
     }
-    let qc = QColor::rgb(i32::from(r), i32::from(g2), i32::from(b));
+    let qc = QColor::from_rgb(i32::from(r), i32::from(g2), i32::from(b));
     p.set_pen_color(&qc);
     let x = col as i32 * g.cell_w;
     let y = y_off + line as i32 * g.cell_h;
@@ -942,7 +942,7 @@ fn render(
         if should_paint_cell_bg(is_cursor, cursor_shape_hidden, selected, bg) {
             let (o_r, o_g, o_b) = if sc.dark { (255, 255, 255) } else { (0, 0, 0) };
             let q = if selected {
-                QColor::rgba(o_r, o_g, o_b, 60)
+                QColor::from_rgba(o_r, o_g, o_b, 60)
             } else {
                 color_q(bg, sc)
             };
@@ -955,7 +955,7 @@ fn render(
             );
         }
         if is_cursor && !cursor_shape_hidden {
-            let q = QColor::rgba(
+            let q = QColor::from_rgba(
                 i32::from(sc.cursor.0),
                 i32::from(sc.cursor.1),
                 i32::from(sc.cursor.2),
@@ -1861,7 +1861,7 @@ fn make_notifier(
                 pw.update();
             }
         }
-    });
+    }).release();
     repaint.start(app.cfg.repaint_delay.max(1) as i32); // 0 = as fast as possible
 }
 
@@ -2891,7 +2891,7 @@ pub fn boot(cfg: Config, dapp: &DApplication) -> App {
                 PaintWidgetEvent::Paint(p, w, h) => {
                     // tab containers cover everything but the divider bands
                     let (r, g, b) = divider;
-                    p.fill_rect(0, 0, w, h, &QColor::rgb(i32::from(r), i32::from(g), i32::from(b)));
+                    p.fill_rect(0, 0, w, h, &QColor::from_rgb(i32::from(r), i32::from(g), i32::from(b)));
                 }
                 PaintWidgetEvent::Resize { w, h } => {
                     // ponytail: one tiny state.toml write per resize frame, no debounce;
