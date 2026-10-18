@@ -27,7 +27,9 @@ use std::io::{Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 rust_i18n::i18n!("locales", fallback = "en");
 
@@ -53,6 +55,9 @@ impl Dimensions for Size {
 #[derive(Clone)]
 pub struct TitleListener {
     slot: Arc<Mutex<Option<String>>>,
+    /// set with every new title; the repaint tick arms the apply timer only
+    /// then (the slot itself is retained forever for pane_label)
+    fresh: Arc<AtomicBool>,
 }
 
 impl alacritty_terminal::event::EventListener for TitleListener {
@@ -64,6 +69,7 @@ impl alacritty_terminal::event::EventListener for TitleListener {
             && !t.is_empty()
         {
             *self.slot.lock().unwrap() = Some(t);
+            self.fresh.store(true, Ordering::Release);
         }
     }
 }
@@ -75,6 +81,8 @@ pub struct Shared {
     term: FairMutex<AppTerm>,
     /// pending OSC title (reader writes); GUI applies it after a coalesce window
     title: Arc<Mutex<Option<String>>>,
+    /// TitleListener sets it per OSC title; cleared when the GUI arms the apply
+    title_fresh: Arc<AtomicBool>,
     /// qtermwidget-style title debounce: only one apply timer in flight
     title_armed: Arc<std::sync::atomic::AtomicBool>,
     /// reader set on output; a per-pane repaint timer (cfg.repaint_delay)
@@ -82,6 +90,12 @@ pub struct Shared {
     /// was paying a syscall + notifier round-trip per ~200B line-buffer
     /// flush, piling ~5-10ms of latency and jitter onto the shell command
     dirty: Arc<std::sync::atomic::AtomicBool>,
+    /// GUI set it after stopping an idle pane's repaint timer; the next
+    /// mark_dirty swaps it back and pokes the socket ('x') once to restart
+    /// the timer — one syscall per idle->busy edge, none per chunk
+    parked: AtomicBool,
+    /// write end of the GUI socketpair, for mark_dirty's wake poke
+    wake: UnixStream,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Option<Box<dyn MasterPty + Send>>>,
 }
@@ -94,6 +108,15 @@ impl Shared {
     /// test hook: write bytes to the shell
     pub fn write(&self, bytes: &[u8]) {
         let _ = self.writer.lock().unwrap().write_all(bytes);
+    }
+    /// request a repaint tick (reader output, or GUI-side scroll); wakes a
+    /// parked pane timer. SeqCst pairs with the GUI's park handshake: either
+    /// the GUI sees dirty before stopping, or we see parked and poke
+    fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::SeqCst);
+        if self.parked.swap(false, Ordering::SeqCst) {
+            let _ = (&self.wake).write_all(b"x");
+        }
     }
 }
 
@@ -423,6 +446,10 @@ struct Fonts {
     bold: QFont,
     italic: QFont,
     bold_italic: QFont,
+    /// shaped advance per (glyph, bold, italic): render pins every non-ASCII
+    /// glyph to its cell and needs its advance each frame; a QFontMetrics
+    /// shaping call per CJK/powerline cell was ~25% of a CJK frame
+    advances: RefCell<std::collections::HashMap<(char, bool, bool), i32>>,
 }
 
 impl Fonts {
@@ -440,7 +467,16 @@ impl Fonts {
             bold,
             italic,
             bold_italic,
+            advances: RefCell::default(),
         }
+    }
+
+    fn advance(&self, c: char, bold: bool, italic: bool, font: &QFont) -> i32 {
+        *self
+            .advances
+            .borrow_mut()
+            .entry((c, bold, italic))
+            .or_insert_with(|| font.advance(c.encode_utf8(&mut [0u8; 4])))
     }
 }
 
@@ -996,7 +1032,7 @@ fn render(
             // advance than the cell (14px in a 10px cell): clip to the glyph's real
             // advance so it renders at natural size overhanging right (alacritty
             // style), instead of the 1-cell clip cutting the right half off
-            let adv = font.advance(glyph);
+            let adv = fonts.advance(c, st.bold, st.italic, font);
             p.save();
             p.set_clip_rect(
                 col as i32 * g.cell_w,
@@ -1577,7 +1613,7 @@ fn shell_cmd(cfg: &Config) -> CommandBuilder {
 }
 
 /// term + pty + reader thread; the reader pokes the GUI over a socketpair,
-/// one byte per event ('x' output, 'q' shell gone)
+/// one byte per event ('x' output woke a parked pane, 'q' shell gone)
 fn spawn_shell(
     cfg: &Config,
     cols: usize,
@@ -1585,6 +1621,10 @@ fn spawn_shell(
     cwd: Option<String>,
 ) -> (Arc<Shared>, u32, &'static mut UnixStream) {
     let title_slot = Arc::new(Mutex::new(None::<String>));
+    let title_fresh = Arc::new(AtomicBool::new(false));
+    let (mut gui_end, gui_read) = UnixStream::pair().expect("socketpair");
+    gui_read.set_nonblocking(true).expect("nonblocking");
+    let gui_read: &'static mut UnixStream = Box::leak(Box::new(gui_read));
     let term = Term::new(
         term::Config {
             scrolling_history: cfg.scrollback,
@@ -1603,13 +1643,17 @@ fn spawn_shell(
         &Size { cols, lines },
         TitleListener {
             slot: title_slot.clone(),
+            fresh: title_fresh.clone(),
         },
     );
     let shared = Arc::new(Shared {
         term: FairMutex::new(term),
         title: title_slot,
+        title_fresh,
         title_armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        parked: AtomicBool::new(false),
+        wake: gui_end.try_clone().expect("socketpair clone"),
         writer: Mutex::new(Box::new(std::io::sink()) as Box<dyn Write + Send>),
         master: Mutex::new(None),
     });
@@ -1629,9 +1673,6 @@ fn spawn_shell(
     let pid = child.process_id().unwrap_or(0);
     *shared.writer.lock().unwrap() = pty.master.take_writer().expect("pty writer");
 
-    let (mut gui_end, gui_read) = UnixStream::pair().expect("socketpair");
-    gui_read.set_nonblocking(true).expect("nonblocking");
-    let gui_read: &'static mut UnixStream = Box::leak(Box::new(gui_read));
     {
         let shared = shared.clone();
         let mut reader = pty.master.try_clone_reader().expect("pty reader");
@@ -1646,7 +1687,7 @@ fn spawn_shell(
                             let mut term = shared.term.lock();
                             processor.advance(&mut *term, &buf[..n]);
                         }
-                        shared.dirty.store(true, std::sync::atomic::Ordering::Release);
+                        shared.mark_dirty();
                     }
                 }
             }
@@ -1667,34 +1708,142 @@ fn spawn_shell(
 /// paying a socket write + notifier round-trip per ~200B line-buffer
 /// flush, which piled ~5-10ms of syscall latency and scheduling jitter
 /// onto `time ls`.
+///
+/// CPU: an idle pane parks its timer after PARK_AFTER of silence (no 100Hz
+/// wakeups per pane), and streaming output is paced so painting stays under
+/// ~1/PAINT_DUTY of the GUI thread (see the tick below).
 fn make_notifier(
     gui_read: &'static mut UnixStream,
     app: &App,
     me: &Arc<Shared>,
     parent: &QWidget,
     syncing: &Rc<Cell<bool>>,
+    paint_cost: &Rc<Cell<Duration>>,
 ) {
     // timer + notifier are parented to the pane widget: their Owned guards may
     // drop (Qt adoption owns the native lifetime) and the exit path below stops
     // them — nothing leaks per-pane the way the old .leak() calls did
     let repaint = QTimer::new(parent);
+    let tick_ms = app.cfg.repaint_delay.max(1) as i32; // 0 = as fast as possible
+    // last tick that saw output; the park countdown runs from here
+    let last_output = Rc::new(Cell::new(Instant::now()));
+    // repaint + title driver: poll the dirty flag at cfg.repaint_delay ms
+    // (kitty's repaint_delay — min interval between screen updates). Pending
+    // input repaints immediately (key handler below), so typing echo never
+    // waits for the interval (kitty's input fast-path).
+    //
+    // Two CPU guards on top:
+    // - idle: after PARK_AFTER without output the timer stops; the reader
+    //   pokes 'x' on its next chunk and the notifier restarts it
+    // - pacing: a full-frame QPainter render costs 1.5ms (ASCII, 1x) to 20ms
+    //   (CJK, 2x scale) per frame, so a spinner or streaming agent at 100fps
+    //   pinned a core. The next frame waits PAINT_DUTY x the last paint's
+    //   cost, so rendering stays under ~1/PAINT_DUTY of the GUI thread; cheap
+    //   frames still run at the full repaint_delay rate
+    let next_frame = Rc::new(Cell::new(Instant::now()));
+    let tick = Rc::new({
+        let app = app.clone();
+        let me = me.clone();
+        let syncing = syncing.clone();
+        let repaint = repaint.clone();
+        let paint_cost = paint_cost.clone();
+        let last_output = last_output.clone();
+        move || {
+            let now = Instant::now();
+            if me.title_fresh.swap(false, Ordering::Acquire) {
+                arm_title_apply(&app, &me);
+            }
+            if !me.dirty.load(Ordering::SeqCst) {
+                if now.duration_since(last_output.get()) >= PARK_AFTER {
+                    // park handshake (pairs with Shared::mark_dirty): it either
+                    // sees parked and pokes 'x', or we see its dirty here —
+                    // whoever wins the swap keeps the timer awake
+                    me.parked.store(true, Ordering::SeqCst);
+                    if !(me.dirty.load(Ordering::SeqCst) && me.parked.swap(false, Ordering::SeqCst)) {
+                        repaint.stop();
+                    }
+                }
+                return;
+            }
+            last_output.set(now);
+            if now < next_frame.get() {
+                return; // paced: dirty stays set for a later tick
+            }
+            me.dirty.store(false, Ordering::SeqCst);
+            let loc = {
+                let ts = app.tabs.borrow();
+                ts.iter().enumerate().find_map(|(ti, t)| {
+                    t.panes
+                        .iter()
+                        .find(|p| Arc::ptr_eq(&p.shared, &me))
+                        .map(|p| (ti, p.id))
+                })
+            };
+            let Some((ti, _pane_id)) = loc else { return };
+            // repaint only if this pane is on screen; clone the handles under
+            // the borrow, make native calls after it drops (dtk drains deferred
+            // callbacks on native-call exit — reentrancy)
+            let target = if ti == app.active.get() {
+                let ts = app.tabs.borrow();
+                ts.get(ti)
+                    .and_then(|tab| tab.panes.iter().find(|p| Arc::ptr_eq(&p.shared, &me)))
+                    .map(|p| (p.pw.clone(), p.sb.clone(), p.geom.clone()))
+            } else {
+                None
+            };
+            if let Some((pw, sb, geom)) = target {
+                // scrollbar + IME anchor follow the live term; the paint
+                // callback borrows native state, so they sync here instead
+                sync_chrome(&me, &pw, &sb, &geom.get(), &syncing);
+                pw.update();
+                // the paint lands later this loop turn; pace off the last
+                // measured frame (the previous one), close enough for a stream
+                next_frame.set(now + paint_cost.get() * PAINT_DUTY);
+            }
+        }
+    });
     let notifier = QSocketNotifier::new(gui_read.as_raw_fd(), parent);
     notifier.on_activated({
         let app = app.clone();
         let me = me.clone();
         let notifier = notifier.clone();
         let repaint = repaint.clone();
+        let last_output = last_output.clone();
+        let tick = tick.clone();
         move || {
             let mut drain = [0u8; 4096];
             let mut exited = false;
-            while let Ok(n) = gui_read.read(&mut drain) {
-                if n == 0 {
-                    break;
+            let mut woke = false;
+            let mut eof = false;
+            loop {
+                match gui_read.read(&mut drain) {
+                    Ok(0) => {
+                        eof = true;
+                        break;
+                    }
+                    Ok(n) => {
+                        exited |= drain[..n].contains(&b'q');
+                        woke |= drain[..n].contains(&b'x');
+                    }
+                    Err(_) => break, // WouldBlock: drained
                 }
-                exited |= drain[..n].contains(&b'q');
+            }
+            if exited || eof {
+                // fd stays "readable" at EOF: stop the notifier before anything
+                // can bail out, or the event loop re-fires on it forever (100%
+                // CPU after the pane closes)
+                notifier.set_enabled(false);
+                repaint.stop(); // a dead pane must not keep ticking
             }
             if !exited {
-                return; // only 'q' travels this socket now; repaint runs on the timer
+                if woke && !eof {
+                    // output on a parked pane (typing echo after a pause, a
+                    // command's first line): paint now, then resume ticking
+                    last_output.set(Instant::now());
+                    repaint.start(tick_ms);
+                    tick();
+                }
+                return;
             }
             // locate (tab, pane) by shared identity
             let loc = {
@@ -1707,10 +1856,6 @@ fn make_notifier(
                 })
             };
             let Some((ti, pane_id)) = loc else { return };
-            // fd stays "readable" at EOF: stop the notifier or the event
-            // loop re-fires on it forever (100% CPU after the pane closes)
-            notifier.set_enabled(false);
-            repaint.stop(); // a dead pane must not keep ticking
             let last_pane = app.tabs.borrow()[ti].panes.len() == 1;
             if last_pane {
                 // last pane: the whole tab goes (single code path for "shell gone")
@@ -1775,94 +1920,59 @@ fn make_notifier(
         }
     });
 
-    // repaint + title driver: poll the dirty flag at cfg.repaint_delay ms
-    // (kitty's repaint_delay — min interval between screen updates; no
-    // stream cap, continuous output repaints at this cadence). Idle panes
-    // do nothing (flag stays clear), so the cost is one atomic load per
-    // tick. Pending input repaints immediately (key handler below), so
-    // typing echo never waits for the interval (kitty's input fast-path).
-    repaint.on_timeout({
-        let app = app.clone();
-        let me = me.clone();
-        let syncing = syncing.clone();
-        move || {
-            if !me.dirty.swap(false, std::sync::atomic::Ordering::Acquire) {
-                return;
-            }
-            let loc = {
+    repaint.on_timeout(move || tick()).release();
+    repaint.start(tick_ms);
+}
+
+/// a pane's repaint timer stops after this long without output
+const PARK_AFTER: Duration = Duration::from_millis(200);
+/// streaming output repaints no sooner than PAINT_DUTY x the last frame's
+/// paint time after it: rendering uses at most ~1/PAINT_DUTY of the GUI thread
+const PAINT_DUTY: u32 = 4;
+
+/// OSC title: coalesce like qtermwidget's 20ms title timer — rapid
+/// reset->set bursts (prompt redraw after every command) collapse to the
+/// latest value, so transient titles never reach the tab. Armed only when a
+/// new title arrived: the slot keeps the last title forever, so testing it
+/// alone re-applied the tab + window title ~33x/s during any output
+fn arm_title_apply(app: &App, me: &Arc<Shared>) {
+    if me.title_armed.swap(true, Ordering::SeqCst) {
+        return; // one apply in flight; it reads the latest title when it fires
+    }
+    let me = me.clone();
+    let app = app.clone();
+    QTimer::single_shot(30, move || {
+        me.title_armed.store(false, Ordering::SeqCst);
+        let t = me.title.lock().unwrap().clone();
+        if let Some(t) = t {
+            // pure phase: is this pane its tab's focused one?
+            let hit = {
                 let ts = app.tabs.borrow();
-                ts.iter().enumerate().find_map(|(ti, t)| {
-                    t.panes
-                        .iter()
-                        .find(|p| Arc::ptr_eq(&p.shared, &me))
-                        .map(|p| (ti, p.id))
-                })
+                ts.iter()
+                    .enumerate()
+                    .find(|(_, tb)| tb.panes.iter().any(|p| Arc::ptr_eq(&p.shared, &me)))
+                    .map(|(ti, tab)| {
+                        let pid = tab
+                            .panes
+                            .iter()
+                            .find(|p| Arc::ptr_eq(&p.shared, &me))
+                            .map(|p| p.id)
+                            .unwrap_or(0);
+                        (ti, tab.active_pane.get() == pid)
+                    })
             };
-            let Some((ti, _pane_id)) = loc else { return };
-            // OSC title: coalesce like qtermwidget's 20ms title timer — rapid
-            // reset->set bursts (prompt redraw after every command) collapse to
-            // the latest value, so transient titles never reach the tab
-            if me.title.lock().unwrap().is_some()
-                && !me
-                    .title_armed
-                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+            // native phase: tabbar calls can drain deferred dtk
+            // callbacks — never under a `tabs` borrow
+            if let Some((ti, true)) = hit
+                && app.tabbar.tab_text(ti as i32) != t
             {
-                let me = me.clone();
-                let app = app.clone();
-                QTimer::single_shot(30, move || {
-                    me.title_armed
-                        .store(false, std::sync::atomic::Ordering::SeqCst);
-                    let t = me.title.lock().unwrap().clone();
-                    if let Some(t) = t {
-                        // pure phase: is this pane its tab's focused one?
-                        let hit = {
-                            let ts = app.tabs.borrow();
-                            ts.iter()
-                                .enumerate()
-                                .find(|(_, tb)| tb.panes.iter().any(|p| Arc::ptr_eq(&p.shared, &me)))
-                                .map(|(ti, tab)| {
-                                    let pid = tab
-                                        .panes
-                                        .iter()
-                                        .find(|p| Arc::ptr_eq(&p.shared, &me))
-                                        .map(|p| p.id)
-                                        .unwrap_or(0);
-                                    (ti, tab.active_pane.get() == pid)
-                                })
-                        };
-                        // native phase: tabbar calls can drain deferred dtk
-                        // callbacks — never under a `tabs` borrow
-                        if let Some((ti, true)) = hit
-                            && app.tabbar.tab_text(ti as i32) != t
-                        {
-                            app.tabbar.set_tab_text(ti as i32, &t);
-                            app.tabbar.as_widget().flush_layout();
-                        }
-                    }
-                    // shell set a title: refresh the taskbar too (%w behavior)
-                    update_window_title(&app);
-                });
-            }
-            // repaint only if this pane is on screen; clone the handles under
-            // the borrow, make native calls after it drops (dtk drains deferred
-            // callbacks on native-call exit — reentrancy)
-            let target = if ti == app.active.get() {
-                let ts = app.tabs.borrow();
-                ts.get(ti)
-                    .and_then(|tab| tab.panes.iter().find(|p| Arc::ptr_eq(&p.shared, &me)))
-                    .map(|p| (p.pw.clone(), p.sb.clone(), p.geom.clone()))
-            } else {
-                None
-            };
-            if let Some((pw, sb, geom)) = target {
-                // scrollbar + IME anchor follow the live term; the paint
-                // callback borrows native state, so they sync here instead
-                sync_chrome(&me, &pw, &sb, &geom.get(), &syncing);
-                pw.update();
+                app.tabbar.set_tab_text(ti as i32, &t);
+                app.tabbar.as_widget().flush_layout();
             }
         }
-    }).release();
-    repaint.start(app.cfg.repaint_delay.max(1) as i32); // 0 = as fast as possible
+        // shell set a title: refresh the taskbar too (%w behavior)
+        update_window_title(&app);
+    });
 }
 
 fn copy_selection(shared: &Arc<Shared>) {
@@ -2000,8 +2110,11 @@ fn make_pane(
     let font_size = Cell::new(app.cfg.font_size);
     let geom = Rc::new(Cell::new(geom_for(&app.cfg, app.cfg.font_size)));
     let fonts = Rc::new(RefCell::new(Fonts::of(&app.cfg, app.cfg.font_size)));
+    // last frame's render time; the repaint timer paces streaming output by it
+    let paint_cost = Rc::new(Cell::new(Duration::ZERO));
     let pw = PaintWidget::new(Some(container), {
         let app = app.clone();
+        let paint_cost = paint_cost.clone();
         let geom = geom.clone();
         let fonts = fonts.clone();
         let shared = shared.clone();
@@ -2058,6 +2171,7 @@ fn make_pane(
         let pane_drag = Rc::new(Cell::new(None::<u64>));
         move |ev| match ev {
             PaintWidgetEvent::Paint(p, w, h) => {
+                let t0 = Instant::now();
                 // per-pane font: read this pane's live cell metrics + fonts
                 let geom = geom.get();
                 let fonts = fonts.borrow();
@@ -2119,6 +2233,7 @@ fn make_pane(
                 // scrollbar sync + IME anchor moved to sync_chrome: it runs
                 // from the repaint timer / Resize arm — native calls from
                 // inside this paint callback panic under dtk runtime rules
+                paint_cost.set(t0.elapsed()); // repaint-timer pacing input
             }
             // Ctrl press/release over a link toggles the clickable cursor even
             // without a mouse move
@@ -2195,7 +2310,7 @@ fn make_pane(
                 let app_cursor = shared.term.lock().mode().contains(TermMode::APP_CURSOR);
                 if let Some(bytes) = key_bytes(&k, app_cursor) {
                     shared.term.lock().scroll_display(Scroll::Bottom);
-                    shared.dirty.store(true, std::sync::atomic::Ordering::Release);
+                    shared.mark_dirty();
                     let _ = shared.writer.lock().unwrap().write_all(&bytes);
                 }
             }
@@ -2380,7 +2495,7 @@ fn make_pane(
                     shared.term.lock().scroll_display(Scroll::Delta(lines));
                     // wake the repaint timer: it syncs the scrollbar to the
                     // new display offset (paint may not make native calls)
-                    shared.dirty.store(true, std::sync::atomic::Ordering::Release);
+                    shared.mark_dirty();
                     if let Some(w) = &*pw_slot.borrow() {
                         w.update();
                     }
@@ -2506,7 +2621,14 @@ fn make_pane(
         }
     });
 
-    make_notifier(gui_read, app, &shared, &pw.as_widget(), &syncing_sb);
+    make_notifier(
+        gui_read,
+        app,
+        &shared,
+        &pw.as_widget(),
+        &syncing_sb,
+        &paint_cost,
+    );
 
     Pane {
         id,
