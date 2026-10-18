@@ -454,7 +454,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -466,7 +466,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 [[package]]
 name = "dtk"
 version = "0.1.0"
-source = "git+https://github.com/st0nie/dtk-rs#1b93f97a7d132b7e92087efe54a84289b6fc4150"
+source = "git+https://github.com/st0nie/dtk-rs#7945dfb4122e6b43f2e239b4ed7daafdcf82765f"
 dependencies = [
  "cxx-qt-lib",
  "dtk-cxxqt",
@@ -477,7 +477,7 @@ dependencies = [
 [[package]]
 name = "dtk-cxxqt"
 version = "0.1.0"
-source = "git+https://github.com/st0nie/dtk-rs#1b93f97a7d132b7e92087efe54a84289b6fc4150"
+source = "git+https://github.com/st0nie/dtk-rs#7945dfb4122e6b43f2e239b4ed7daafdcf82765f"
 dependencies = [
  "cxx",
  "cxx-gen",
@@ -491,7 +491,7 @@ dependencies = [
 [[package]]
 name = "dtk-sys"
 version = "0.1.0"
-source = "git+https://github.com/st0nie/dtk-rs#1b93f97a7d132b7e92087efe54a84289b6fc4150"
+source = "git+https://github.com/st0nie/dtk-rs#7945dfb4122e6b43f2e239b4ed7daafdcf82765f"
 dependencies = [
  "cxx",
  "cxx-build",
@@ -536,7 +536,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1086,7 +1086,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1603,7 +1603,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
